@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>AntifyBot · 局域网快传</title>
+  <meta name="description" content="同一内网下，电脑与手机免注册互传文件与消息">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f6f1e7">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#171310">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="AntifyBot">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div id="app">
+
+    <!-- ══════════ 顶栏 ══════════ -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-ant" aria-hidden="true"></span>
+        <div class="brand-text">
+          <h1>AntifyBot</h1>
+          <p class="sub"><span id="net-name">局域网</span> · <b id="online-count">1</b> 台设备在线</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button id="presence-rail" class="presence-rail" aria-label="查看在线设备" title="在线设备"></button>
+        <button id="btn-qr" class="icon-btn" aria-label="显示加入二维码" title="扫码加入">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20v.01M17.5 17.5L20 20M20 17v3"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- 断线提示 -->
+    <div id="reconnect" class="reconnect" role="status" hidden>蚁道中断，正在重连…</div>
+
+    <!-- ══════════ 消息流 ══════════ -->
+    <main id="chat" class="chat">
+      <div id="messages" class="messages" aria-live="polite"></div>
+
+      <div id="empty" class="empty" hidden>
+        <div class="empty-ant" aria-hidden="true"></div>
+        <h2>这是你的蚁巢</h2>
+        <p>同一 Wi-Fi 下的设备打开本页即可互发消息与文件，<br>免注册、不经过外网。点击右上角
+          <button class="linklike" id="empty-qr">二维码</button>分享给手机。
+        </p>
+        <p class="empty-tip">试试：拖拽任意文件到这里 · 粘贴截图 · 拖蓝选中发送文字</p>
+      </div>
+    </main>
+
+    <!-- 对方正在输入 -->
+    <div id="typing" class="typing" hidden></div>
+
+    <!-- ══════════ 输入区 ══════════ -->
+    <footer class="composer">
+      <button id="btn-attach" class="icon-btn attach" aria-label="选择文件发送" title="发送文件">
+        <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+      </button>
+      <div class="input-wrap">
+        <textarea id="input" rows="1" placeholder="发消息，或拖入 / 粘贴文件…" enterkeyhint="send"></textarea>
+      </div>
+      <button id="btn-send" class="send-btn" aria-label="发送">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+      </button>
+      <input type="file" id="file-input" multiple hidden>
+    </footer>
+  </div>
+
+  <!-- 拖拽遮罩 -->
+  <div id="drop-overlay" hidden>
+    <div class="drop-card">
+      <div class="drop-ant" aria-hidden="true"></div>
+      <p>松手，交给蚁群搬运</p>
+    </div>
+  </div>
+
+  <!-- 底部弹层：二维码 -->
+  <div id="sheet-backdrop" hidden></div>
+  <section id="sheet-qr" class="sheet" role="dialog" aria-modal="true" aria-label="分享二维码" hidden>
+    <h2 class="sheet-title">邀请设备加入</h2>
+    <p class="sheet-desc">手机扫码，或浏览器输入地址（需同一 Wi-Fi）</p>
+    <div class="qr-holder"><img id="qr-img" alt="加入二维码" width="230" height="230"></div>
+    <div class="qr-url-row">
+      <code id="qr-url"></code>
+      <button id="btn-copy-url" class="mini-btn">复制</button>
+    </div>
+    <p class="sheet-meta" id="qr-meta"></p>
+  </section>
+
+  <!-- 底部弹层：设备列表 / 改名 -->
+  <section id="sheet-devices" class="sheet" role="dialog" aria-modal="true" aria-label="在线设备" hidden>
+    <h2 class="sheet-title">在线设备</h2>
+    <ul id="device-list" class="device-list"></ul>
+    <div class="rename-row">
+      <label for="rename-input">我的名字</label>
+      <input id="rename-input" maxlength="24" autocomplete="off" spellcheck="false">
+      <button id="btn-rename" class="mini-btn">保存</button>
+    </div>
+    <p class="sheet-meta">身份保存在本机浏览器，无需注册；换设备就是新蚂蚁。</p>
+  </section>
+
+  <!-- 图片灯箱 -->
+  <div id="lightbox" class="lightbox" hidden>
+    <img id="lightbox-img" alt="">
+    <div class="lightbox-bar">
+      <a id="lightbox-download" class="mini-btn" download>下载原图</a>
+      <button id="lightbox-close" class="mini-btn">关闭</button>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="assertive"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>

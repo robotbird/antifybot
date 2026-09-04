@@ -1,0 +1,8 @@
+node_modules/
+files/
+*.log
+.DS_Store
+
+# mac 应用构建产物（bash mac/build.sh 可再生）
+mac/build/
+mac/AntifyBot.app

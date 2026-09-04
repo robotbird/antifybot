@@ -1,0 +1,771 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AntifyBot P2P · 蚁间直传</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><text y='52' font-size='52'>🐜</text></svg>">
+<style>
+/* ============ 暖纸 + 蚁群（与 AntifyBot 主应用同源的设计语言） ============ */
+:root{
+  --paper:#f6f1e7; --paper-2:#efe7d7; --ink:#2b2118; --ink-soft:#6f6154;
+  --line:#e2d6c2; --amber:#e8641c; --amber-deep:#c74f10; --amber-ink:#fff7ef;
+  --ok:#2f8a4c; --err:#c0392b;
+  --card:#fffdf8; --shadow:0 10px 30px -12px rgba(64,42,16,.25);
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --paper:#171310; --paper-2:#211b15; --ink:#f0e7d8; --ink-soft:#a89a86;
+    --line:#372e24; --amber:#f07a30; --amber-deep:#e8641c; --amber-ink:#241505;
+    --card:#211b15; --shadow:0 12px 32px -14px rgba(0,0,0,.7);
+  }
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;padding:0}
+body{
+  background:var(--paper); color:var(--ink); font-family:var(--font);
+  min-height:100dvh; line-height:1.55;
+  -webkit-font-smoothing:antialiased;
+}
+#app{max-width:820px;margin:0 auto;height:100dvh;display:grid;
+  grid-template-rows:auto auto 1fr auto;padding:env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+}
+
+/* ---------- 顶栏 ---------- */
+.topbar{grid-row:1;min-width:0;display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:10px;min-width:0;flex:1}
+.brand .logo{width:34px;height:34px;flex:none;filter:drop-shadow(0 2px 3px rgba(200,90,20,.25))}
+.brand-text{min-width:0}
+.brand-text b{font-size:17px;letter-spacing:.3px}
+.brand-text b i{color:var(--amber);font-style:normal}
+.sub{font-size:11.5px;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--font-mono)}
+.chip{flex:none;display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:5px 11px;border-radius:999px;
+  border:1px solid var(--line);background:var(--card);white-space:nowrap}
+.chip .dot{width:8px;height:8px;border-radius:50%;background:#b8a88f;flex:none}
+.chip.on .dot{background:var(--ok);box-shadow:0 0 0 3px rgba(47,138,76,.18);animation:pulse 2.2s infinite}
+.chip.mid .dot{background:#d19b3a}
+@keyframes pulse{50%{box-shadow:0 0 0 6px rgba(47,138,76,0)}}
+
+/* ---------- 断线横幅 ---------- */
+.banner{grid-row:2;display:flex;align-items:center;gap:10px;padding:8px 16px;font-size:13px;
+  background:rgba(192,57,43,.12);color:var(--err);border-bottom:1px solid rgba(192,57,43,.25)}
+.banner button{margin-left:auto}
+
+/* ---------- 聊天区 ---------- */
+.chat{grid-row:3;min-height:0;overflow-y:auto;padding:16px 14px 8px;scroll-behavior:smooth}
+#empty{margin:auto;text-align:center;color:var(--ink-soft);font-size:13.5px;padding:40px 20px}
+#empty .logo{width:56px;height:56px;opacity:.85;margin-bottom:10px}
+.sys{margin:10px auto;max-width:88%;text-align:center;font-size:12px;color:var(--ink-soft);
+  background:var(--paper-2);border:1px solid var(--line);border-radius:999px;padding:4px 12px;width:fit-content}
+.msg{display:flex;gap:9px;margin:9px 0;align-items:flex-end}
+.msg.mine{flex-direction:row-reverse}
+.avatar{width:30px;height:30px;flex:none;border-radius:10px;background:hsl(var(--h,40) 42% 82%);
+  display:grid;place-items:center;border:1px solid var(--line);overflow:hidden}
+@media (prefers-color-scheme: dark){.avatar{background:hsl(var(--h,40) 30% 26%)}}
+.avatar svg{width:24px;height:24px}
+.avatar svg .ant-body{fill:hsl(var(--h,40) 55% 32%);stroke:none}
+.avatar svg .ant-limb{stroke:hsl(var(--h,40) 45% 38%)}
+.msg-main{max-width:min(72%,480px);display:flex;flex-direction:column;min-width:0}
+.msg.mine .msg-main{align-items:flex-end}
+.msg-name{font-size:11px;color:var(--ink-soft);margin:0 4px 3px}
+.bubble{padding:8px 12px;border-radius:14px;background:var(--card);border:1px solid var(--line);
+  box-shadow:0 2px 8px -4px rgba(64,42,16,.15);overflow-wrap:break-word;white-space:pre-wrap;max-width:100%}
+.msg:not(.mine) .bubble{border-bottom-left-radius:5px}
+.msg.mine .bubble{background:linear-gradient(135deg,var(--amber),var(--amber-deep));color:var(--amber-ink);
+  border:none;border-bottom-right-radius:5px}
+.msg-time{font-size:10.5px;color:var(--ink-soft);margin:3px 5px 0;font-family:var(--font-mono)}
+.tick{color:var(--amber);font-weight:700;margin-left:4px}
+
+/* ---------- 文件卡片 ---------- */
+.file-card{display:flex;align-items:center;gap:10px;min-width:200px;max-width:100%;padding:9px 11px;
+  background:var(--paper-2);border:1px solid var(--line);border-radius:12px}
+.msg.mine .file-card{background:rgba(255,255,255,.22);border-color:rgba(255,255,255,.35)}
+.file-tile{width:40px;height:40px;flex:none;border-radius:9px;display:grid;place-items:center;
+  font-family:var(--font-mono);font-size:10.5px;font-weight:700;color:#fff}
+.file-tile[data-kind=image]{background:#3d7a4e}.file-tile[data-kind=video]{background:#8a4b9c}
+.file-tile[data-kind=audio]{background:#b0682c}.file-tile[data-kind=zip]{background:#7a6a3d}
+.file-tile[data-kind=doc]{background:#3d5c8a}.file-tile[data-kind=code]{background:#3d6d7d}
+.file-tile[data-kind=file]{background:#6f6154}
+.file-info{flex:1;min-width:0}
+.file-name{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.file-meta{font-family:var(--font-mono);font-size:11px;opacity:.78;margin-top:3px;font-variant-numeric:tabular-nums}
+.file-dl,.mini-btn{flex:none;border:none;cursor:pointer;color:inherit;background:transparent}
+.file-dl{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;color:var(--ink-soft)}
+.file-dl:hover{background:rgba(128,100,60,.14);color:var(--ink)}
+.file-dl svg{width:17px;height:17px}
+.mini-btn{font-size:12px;font-weight:600;padding:7px 13px;border-radius:9px;background:var(--amber);color:var(--amber-ink)}
+.mini-btn:hover{filter:brightness(1.08)}
+
+/* ---------- 蚁径进度 ---------- */
+.trail{position:relative;height:5px;margin-top:7px;border-radius:999px;background:rgba(128,100,60,.22);overflow:visible}
+.trail-fill{position:absolute;inset:0 auto 0 0;width:0%;border-radius:999px;
+  background:linear-gradient(90deg,var(--amber-deep),var(--amber))}
+.trail-ant{position:absolute;left:0%;top:50%;width:16px;height:16px;transform:translate(-50%,-50%) rotate(90deg);
+  transition:left .18s linear;animation:march .5s infinite alternate}
+.trail-ant svg{width:100%;height:100%}
+.trail-ant svg .ant-body{fill:var(--amber-deep);stroke:none}
+.trail-ant svg .ant-limb{stroke:var(--amber-deep)}
+@keyframes march{to{transform:translate(-50%,-50%) rotate(90deg) scale(1.15)}}
+@media (prefers-reduced-motion: reduce){.trail-ant{animation:none}.chip.on .dot{animation:none}}
+
+/* ---------- 输入区 ---------- */
+.composer{grid-row:4;display:flex;gap:9px;padding:10px 14px calc(10px + env(safe-area-inset-bottom));
+  border-top:1px solid var(--line);background:var(--paper)}
+.icon-btn{width:42px;height:42px;flex:none;border-radius:12px;border:1px solid var(--line);cursor:pointer;
+  background:var(--card);color:var(--ink);display:grid;place-items:center;transition:.15s}
+.icon-btn:hover{border-color:var(--amber);color:var(--amber)}
+.icon-btn svg{width:19px;height:19px}
+#input{flex:1;min-width:0;height:42px;border-radius:12px;border:1px solid var(--line);background:var(--card);
+  color:var(--ink);padding:0 14px;font-size:14.5px;font-family:var(--font);outline:none}
+#input:focus{border-color:var(--amber);box-shadow:0 0 0 3px rgba(232,100,28,.15)}
+#btn-send{width:46px;height:42px;flex:none;border:none;border-radius:12px;cursor:pointer;
+  background:linear-gradient(135deg,var(--amber),var(--amber-deep));color:var(--amber-ink);
+  display:grid;place-items:center;transition:.15s}
+#btn-send:hover{filter:brightness(1.08)}
+#btn-send svg{width:19px;height:19px;margin-left:2px}
+
+/* ---------- 配对页 ---------- */
+#pairing{grid-row:2 / span 3;overflow-y:auto;padding:22px 18px calc(26px + env(safe-area-inset-bottom))}
+.pair-head{text-align:center;margin:8px 0 18px}
+.pair-head .logo{width:66px;height:66px;margin-bottom:6px;filter:drop-shadow(0 4px 6px rgba(200,90,20,.3))}
+.pair-head h1{font-size:22px;margin:0}
+.pair-head h1 i{color:var(--amber);font-style:normal}
+.pair-head p{margin:6px 0 0;color:var(--ink-soft);font-size:13px}
+.pair-head .tagline{display:inline-block;margin-top:10px;font-size:12px;padding:5px 13px;border-radius:999px;
+  border:1px dashed var(--amber);color:var(--amber)}
+.name-row{display:flex;gap:9px;max-width:430px;margin:0 auto 18px}
+.name-row input{flex:1;min-width:0;height:42px;border-radius:12px;border:1px solid var(--line);
+  background:var(--card);color:var(--ink);padding:0 14px;font-size:14.5px;font-family:var(--font);outline:none}
+.name-row input:focus{border-color:var(--amber)}
+.steps{display:grid;gap:12px;max-width:560px;margin:0 auto}
+.step{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:15px 16px;box-shadow:var(--shadow)}
+.step .step-tag{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:700;color:var(--amber);
+  font-family:var(--font-mono);margin-bottom:8px}
+.step h3{margin:0 0 4px;font-size:14.5px}
+.step p{margin:0 0 10px;font-size:12.5px;color:var(--ink-soft)}
+.step.active{border-color:var(--amber);box-shadow:0 0 0 3px rgba(232,100,28,.12),var(--shadow)}
+.step.done{opacity:.62}
+.step.done .step-tag::after{content:' ✓'}
+.codebox{width:100%;min-height:74px;max-height:150px;resize:vertical;border-radius:10px;border:1px dashed var(--line);
+  background:var(--paper);color:var(--ink);padding:9px 11px;font-family:var(--font-mono);font-size:11px;
+  line-height:1.5;word-break:break-all;outline:none}
+.codebox:focus{border-color:var(--amber)}
+.row{display:flex;gap:9px;margin-top:9px}
+.btn{border:none;border-radius:11px;cursor:pointer;font-family:var(--font);font-weight:600;font-size:13.5px;
+  padding:10px 18px;transition:.15s;color:var(--amber-ink);background:linear-gradient(135deg,var(--amber),var(--amber-deep))}
+.btn:hover{filter:brightness(1.08)}
+.btn.ghost{background:var(--card);color:var(--ink);border:1px solid var(--line)}
+.btn.ghost:hover{border-color:var(--amber);color:var(--amber)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.hint{font-size:11.5px;color:var(--ink-soft);margin-top:7px}
+kbd{font-family:var(--font-mono);font-size:10.5px;background:var(--paper-2);border:1px solid var(--line);
+  border-bottom-width:2px;border-radius:5px;padding:1px 6px}
+
+/* ---------- toast ---------- */
+/* 顶部居中悬浮：不遮底部输入区/步骤按钮 */
+#toasts{position:fixed;left:50%;transform:translateX(-50%);top:calc(62px + env(safe-area-inset-top));
+  display:flex;flex-direction:column;align-items:center;gap:8px;z-index:99;pointer-events:none;max-width:88vw}
+.toast{background:var(--ink);color:var(--paper);font-size:12.5px;border-radius:999px;padding:8px 16px;
+  box-shadow:var(--shadow);opacity:.96;animation:pop .25s}
+.toast.err{background:var(--err);color:#fff}
+@keyframes pop{from{transform:translateY(8px);opacity:0}}
+
+@media (min-width:640px){
+  .chat{padding:20px 22px 10px}
+  .composer{padding:12px 22px calc(12px + env(safe-area-inset-bottom))}
+  .msg-main{max-width:min(62%,460px)}
+}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" id="logo"></span>
+      <div class="brand-text">
+        <b><i>AntifyBot</i> P2P</b>
+        <div class="sub" id="sub">零服务端 · 蚁间直传</div>
+      </div>
+    </div>
+    <span class="chip" id="state"><span class="dot"></span><span id="state-text">未连接</span></span>
+  </header>
+
+  <!-- 配对页 -->
+  <section id="pairing">
+    <div class="pair-head">
+      <span class="logo" id="logo2"></span>
+      <h1><i>蚁间直传</i></h1>
+      <p>两台设备的浏览器直接对话 —— 不需要任何服务器程序</p>
+      <span class="tagline">同一路由器 / Wi‑Fi 下速度最快 🐜</span>
+    </div>
+
+    <div class="name-row">
+      <input id="name" placeholder="你的名字（对方会看到）" maxlength="24">
+      <button class="btn" id="btn-name-ok">就绪</button>
+    </div>
+
+    <div class="steps">
+      <div class="step" id="st1">
+        <span class="step-tag">STEP 1</span>
+        <h3>在一台设备上生成配对码</h3>
+        <p>两边打开的都是这一个网页文件，任意一方先当"发起方"。</p>
+        <button class="btn" id="btn-offer">我是发起方，生成配对码</button>
+        <div id="offer-out" hidden>
+          <textarea class="codebox" id="code-out" readonly placeholder="配对码生成中…（正在收集网络地址）"></textarea>
+          <div class="row">
+            <button class="btn ghost" id="btn-copy-out">复制配对码</button>
+            <span class="hint" id="out-kind"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="step" id="st2">
+        <span class="step-tag">STEP 2</span>
+        <h3>另一台设备粘贴配对码，生成回执码</h3>
+        <p>把上面的配对码原样发给另一台设备（微信 / 邮件 / 手动誊抄都行），在那边粘进来。</p>
+        <textarea class="codebox" id="code-in" placeholder="在这里粘贴「发起方」的配对码…"></textarea>
+        <div class="row">
+          <button class="btn" id="btn-answer">我是加入方，生成回执码</button>
+        </div>
+        <div id="answer-wrap" hidden>
+          <textarea class="codebox" id="answer-out" readonly placeholder="回执码生成中…"></textarea>
+          <div class="row">
+            <button class="btn ghost" id="btn-copy-answer">复制回执码</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="step" id="st3">
+        <span class="step-tag">STEP 3</span>
+        <h3>发起方粘贴回执码，完成握手</h3>
+        <p>把回执码带回发起方那台设备粘进来，两台设备即建立直连。</p>
+        <textarea class="codebox" id="answer-in" placeholder="在这里粘贴「加入方」的回执码…"></textarea>
+        <div class="row">
+          <button class="btn" id="btn-apply">完成配对</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 断线横幅 -->
+  <div class="banner" id="banner" hidden>
+    <span>🐜 连接已断开</span>
+    <button class="mini-btn" id="btn-re-pair">重新配对</button>
+  </div>
+
+  <!-- 聊天区 -->
+  <main class="chat" id="chat" hidden>
+    <div id="empty">
+      <span class="logo" id="logo3"></span>
+      <div>配对成功！直接发消息或丢文件 —— 数据只在两台设备之间流动。</div>
+    </div>
+    <div id="messages"></div>
+  </main>
+
+  <!-- 输入区 -->
+  <footer class="composer" id="composer" hidden>
+    <input type="file" id="file-input" multiple hidden>
+    <button class="icon-btn" id="btn-file" title="选择文件（可多选）">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+    </button>
+    <input id="input" placeholder="发消息，或把文件拖进窗口…" maxlength="4000" autocomplete="off">
+    <button id="btn-send" title="发送">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+    </button>
+  </footer>
+
+  <div id="toasts"></div>
+</div>
+
+<script>
+/* ================================================================
+ * AntifyBot P2P —— 单文件、零服务端的局域网互传
+ * 传输层 : WebRTC DataChannel（局域网内仅用 host 候选，无需 STUN）
+ * 配对   : 交换压缩后的 SDP（deflate-raw + base64），复制粘贴即信令
+ * 文件   : 16KB 分块 + bufferedAmount 背压 + 完成 ACK
+ * ================================================================ */
+'use strict';
+
+/* ---------- 测试钩子（无副作用，也方便人工在控制台排障） ---------- */
+window.__antify = { files: [], log: [] };
+
+/* ---------- 迷你工具 ---------- */
+const $ = s => document.querySelector(s);
+const CHUNK = 16384;               // 跨浏览器安全的 DataChannel 消息上限
+const BLOCK = 1024 * 1024;         // 每次从 File 读 1MB，再切成 16KB 发送
+const BUF_HIGH = 4 * 1024 * 1024;  // 发送缓冲超过 4MB 暂停（Chrome 上限 16MB）
+const BUF_LOW  = 1 * 1024 * 1024;
+const MAX_FILE = 2048 * 1024 * 1024;
+
+function fmtBytes(n){
+  if (!Number.isFinite(n)) return '?';
+  if (n < 1024) return Math.round(n) + ' B';
+  const u = ['KB','MB','GB','TB']; let v = n, i = -1;
+  do { v /= 1024; i++; } while (v >= 1024 && i < u.length - 1);
+  return (v >= 100 ? Math.round(v) : v.toFixed(1)) + ' ' + u[i];
+}
+function fmtTime(ts){
+  const d = new Date(ts);
+  return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+}
+function hueOf(str){
+  let x = 0;
+  for (const ch of String(str)) x = (x * 31 + ch.codePointAt(0)) % 360;
+  return x;
+}
+function nowId(){ return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+const ANT_SVG = `<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <g class="ant-limb" fill="none" stroke-width="2.6">
+      <path d="M31 39 L25 49"/><path d="M34 41 L34 52"/><path d="M38 39 L44 49"/>
+      <path d="M46 18 C48 12 54 10 58 9"/><path d="M42 17 C42 11 37 8 33 6"/>
+    </g>
+    <ellipse class="ant-body" cx="15" cy="36" rx="12" ry="9.5" transform="rotate(-12 15 36)"/>
+    <circle  class="ant-body" cx="34" cy="34" r="7"/>
+    <circle  class="ant-body" cx="47" cy="26" r="8.5"/>
+    <circle cx="49.6" cy="23.6" r="1.7" fill="rgba(255,255,255,.92)"/>
+  </g></svg>`;
+for (const id of ['logo','logo2','logo3','empty']) {
+  const el = document.getElementById(id === 'empty' ? 'empty' : id);
+  if (id !== 'empty') el.innerHTML = ANT_SVG;
+}
+
+let toastBox = null;
+function toast(text, isErr){
+  if (!toastBox) toastBox = $('#toasts');
+  const t = document.createElement('div');
+  t.className = 'toast' + (isErr ? ' err' : '');
+  t.textContent = text;
+  toastBox.append(t);
+  setTimeout(() => { t.style.transition = 'opacity .3s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 320); }, 2600);
+}
+
+/* ---------- 身份（file:// 下 localStorage 可能被禁，全程 try/catch） ---------- */
+function guessName(){
+  const ua = navigator.userAgent;
+  const os = /Windows/i.test(ua) ? 'Windows' : /Mac/i.test(ua) ? 'Mac' : /Android/i.test(ua) ? 'Android'
+    : /iPhone|iPad/i.test(ua) ? 'iPhone' : /Linux/i.test(ua) ? 'Linux' : '设备';
+  return os + '-' + Math.floor(1000 + Math.random() * 9000);
+}
+let myName = '';
+try { myName = localStorage.getItem('antifybot:p2p-name') || ''; } catch (e) {}
+if (!myName) myName = guessName();
+$('#name').value = myName;
+function saveName(){
+  myName = ($('#name').value.trim() || guessName()).slice(0, 24);
+  $('#name').value = myName;
+  try { localStorage.setItem('antifybot:p2p-name', myName); } catch (e) {}
+}
+
+/* ================================================================
+ * 配对码：JSON(SDP+名字) → deflate-raw → base64，前缀 AB1；不支持压缩则 AB0
+ * ================================================================ */
+function b64(bytes){
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000)
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function unb64(str){
+  const bin = atob(str), out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+async function encodeCode(obj){
+  const json = JSON.stringify(obj);
+  try {
+    const pipe = new Blob([new TextEncoder().encode(json)]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+    const comp = new Uint8Array(await new Response(pipe).arrayBuffer());
+    return 'AB1' + b64(comp);
+  } catch (e) { return 'AB0' + b64(new TextEncoder().encode(json)); }
+}
+async function decodeCode(text){
+  const code = text.replace(/\s+/g, '');
+  if (!/^AB[01]/.test(code)) throw new Error('bad prefix');
+  const bytes = unb64(code.slice(3));
+  if (code.startsWith('AB1')) {
+    const pipe = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    return JSON.parse(await new Response(pipe).text());
+  }
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+/* ================================================================
+ * WebRTC
+ * ================================================================ */
+let pc = null, dc = null, peerName = '';
+const sendQ = []; let pumping = false;
+
+function setState(cls, text){
+  const chip = $('#state');
+  chip.className = 'chip' + (cls ? ' ' + cls : '');
+  $('#state-text').textContent = text;
+}
+function iceDone(p, ms = 2500){
+  return new Promise(res => {
+    if (p.iceGatheringState === 'complete') return res();
+    const t = setTimeout(res, ms);
+    p.addEventListener('icegatheringstatechange', () => {
+      if (p.iceGatheringState === 'complete') { clearTimeout(t); res(); }
+    });
+  });
+}
+function newPC(){
+  const p = new RTCPeerConnection({ iceServers: [] });   // 局域网：host 候选直连，无需 STUN
+  window.__antify.pc = p;                                 // 控制台排障用
+  p.onconnectionstatechange = () => {
+    window.__antify.log.push('pc:' + p.connectionState);
+    if (p.connectionState === 'connected') setState('on', '已直连');
+    if (p.connectionState === 'failed') { setState('', '连接失败'); onDead('ICE 连接失败，请确认两台设备在同一网络'); }
+  };
+  return p;
+}
+
+function wire(ch){
+  dc = ch;
+  ch.binaryType = 'arraybuffer';
+  ch.bufferedAmountLowThreshold = BUF_LOW;
+  ch.onopen = () => {
+    window.__antify.log.push('dc:open');
+    enterChat();
+    ch.send(JSON.stringify({ t: 'hello', name: myName }));
+  };
+  ch.onclose = () => { window.__antify.log.push('dc:close'); onDead('对方关闭了页面或连接中断'); };
+  ch.onerror = () => {};
+  ch.onmessage = ev => {
+    if (typeof ev.data === 'string') onControl(JSON.parse(ev.data));
+    else onChunk(ev.data);
+  };
+}
+
+function enterChat(){
+  saveName();
+  $('#pairing').hidden = true;
+  $('#chat').hidden = false;
+  $('#composer').hidden = false;
+  $('#sub').textContent = '与 ' + (peerName || '对方') + ' 直连中 · 零服务端';
+  setState('on', '已直连');
+  sys('已建立点对点直连 🐜 消息与文件不经任何服务器');
+}
+function onDead(reason){
+  if (!dc && !pc) return;
+  dc = null;
+  $('#banner').hidden = false;
+  setState('', '已断开');
+  toast(reason, true);
+}
+
+/* ---------- 配对三个动作 ---------- */
+$('#btn-offer').addEventListener('click', async () => {
+  saveName();
+  $('#btn-offer').disabled = true;
+  $('#offer-out').hidden = false;
+  $('#code-out').value = '正在生成配对码…（收集网络地址中，约 1–3 秒）';
+  try {
+    pc = newPC();
+    wire(pc.createDataChannel('antify', { ordered: true }));
+    await pc.setLocalDescription(await pc.createOffer());
+    await iceDone(pc);
+    const code = await encodeCode({ sdp: pc.localDescription, name: myName });
+    $('#code-out').value = code;
+    const kb = (code.length / 1024).toFixed(1);
+    $('#out-kind').textContent = code.startsWith('AB1') ? `已压缩 · ${kb} KB · 原样复制全部内容` : `${kb} KB · 原样复制全部内容`;
+    setState('mid', '等待回执…');
+    $('#st1').classList.add('active');
+    $('#st2').classList.remove('active');
+  } catch (e) {
+    $('#btn-offer').disabled = false;
+    $('#offer-out').hidden = true;
+    toast('生成失败：' + e.message, true);
+  }
+});
+
+$('#btn-answer').addEventListener('click', async () => {
+  saveName();
+  const raw = $('#code-in').value;
+  if (!raw.trim()) return toast('先粘贴发起方的配对码', true);
+  $('#btn-answer').disabled = true;
+  try {
+    const data = await decodeCode(raw);
+    if (data.sdp.type !== 'offer') throw new Error('这不是发起方的配对码');
+    peerName = data.name || peerName;
+    pc = newPC();
+    pc.ondatachannel = e => wire(e.channel);
+    await pc.setRemoteDescription(data.sdp);
+    await pc.setLocalDescription(await pc.createAnswer());
+    await iceDone(pc);
+    const code = await encodeCode({ sdp: pc.localDescription, name: myName });
+    $('#answer-wrap').hidden = false;
+    $('#answer-out').value = code;
+    setState('mid', '等待发起方粘贴…');
+    $('#st1').classList.add('done'); $('#st2').classList.add('active');
+  } catch (e) {
+    $('#btn-answer').disabled = false;
+    toast('配对码无效：' + (e.message || '解析失败'), true);
+  }
+});
+
+$('#btn-apply').addEventListener('click', async () => {
+  const raw = $('#answer-in').value;
+  if (!raw.trim()) return toast('先粘贴加入方的回执码', true);
+  if (!pc || !pc.localDescription) return toast('请先在 STEP 1 生成本机配对码', true);
+  $('#btn-apply').disabled = true;
+  try {
+    const data = await decodeCode(raw);
+    if (data.sdp.type !== 'answer') throw new Error('这不是回执码');
+    peerName = data.name || peerName;
+    await pc.setRemoteDescription(data.sdp);
+    setState('mid', '握手完成，连接中…');
+    $('#st3').classList.add('done');
+  } catch (e) {
+    $('#btn-apply').disabled = false;
+    toast('回执码无效：' + (e.message || '解析失败'), true);
+  }
+});
+
+async function copyText(text, okMsg){
+  try { await navigator.clipboard.writeText(text); toast(okMsg); }
+  catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.append(ta); ta.select();
+    try { document.execCommand('copy'); toast(okMsg); } catch (_) { toast('复制失败，请手动全选复制', true); }
+    ta.remove();
+  }
+}
+$('#btn-copy-out').addEventListener('click', () => copyText($('#code-out').value, '配对码已复制，发给对方'));
+$('#btn-copy-answer').addEventListener('click', () => copyText($('#answer-out').value, '回执码已复制，带回发起方'));
+$('#btn-name-ok').addEventListener('click', () => { saveName(); toast('名字已就绪：' + myName); });
+$('#btn-re-pair').addEventListener('click', () => location.reload());
+
+/* ================================================================
+ * 聊天渲染
+ * ================================================================ */
+const msgs = $('#messages'), chatEl = $('#chat');
+let peerHue = 40;
+function nearBottom(){ return chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 160; }
+function scrollBottom(force){ if (force || nearBottom()) chatEl.scrollTop = chatEl.scrollHeight; }
+function checkEmpty(){ $('#empty').hidden = msgs.children.length > 0; }
+function sys(text){
+  const d = document.createElement('div'); d.className = 'sys'; d.textContent = text;
+  msgs.append(d); scrollBottom(); checkEmpty();
+}
+function bubbleRow(mine, inner, timeText){
+  const row = document.createElement('div');
+  row.className = 'msg' + (mine ? ' mine' : '');
+  if (!mine) {
+    const av = document.createElement('span');
+    av.className = 'avatar'; av.style.setProperty('--h', String(peerHue)); av.innerHTML = ANT_SVG;
+    row.append(av);
+  }
+  const main = document.createElement('div'); main.className = 'msg-main';
+  if (!mine) { const n = document.createElement('div'); n.className = 'msg-name'; n.textContent = peerName; main.append(n); }
+  const b = document.createElement('div'); b.className = 'bubble';
+  if (typeof inner === 'string') b.textContent = inner; else b.append(inner);
+  const t = document.createElement('div'); t.className = 'msg-time'; t.textContent = timeText;
+  main.append(b, t); row.append(main); msgs.append(row);
+  scrollBottom(mine); checkEmpty();
+  return { row, bubble: b, time: t };
+}
+
+function kindOf(name){
+  if (/\.(png|jpe?g|gif|webp|heic|bmp|svg|avif)$/i.test(name)) return 'image';
+  if (/\.(mp4|mov|mkv|webm|avi)$/i.test(name)) return 'video';
+  if (/\.(mp3|wav|flac|m4a|aac|ogg)$/i.test(name)) return 'audio';
+  if (/\.(zip|tar|rar|7z|gz|bz2|xz|dmg|iso)$/i.test(name)) return 'zip';
+  if (/\.(pdf|docx?|xlsx?|pptx?|pages|numbers|key|csv)$/i.test(name)) return 'doc';
+  if (/\.(js|ts|json|xml|yaml|html|css|py|java|sh|c|cpp|go|rs)$/i.test(name)) return 'code';
+  return 'file';
+}
+function extOf(name){ const m = /\.([a-z0-9]{1,5})$/i.exec(name || ''); return m ? m[1] : 'FILE'; }
+function el(tag, cls, text){
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function fileCard(kind, name){
+  const card = el('div', 'file-card');
+  const tile = el('div', 'file-tile'); tile.dataset.kind = kind; tile.textContent = extOf(name);
+  const info = el('div', 'file-info');
+  const fn = el('div', 'file-name', name); fn.title = name;
+  const meta = el('div', 'file-meta', '');
+  const fill = el('div', 'trail-fill');
+  const ant = el('span', 'trail-ant'); ant.innerHTML = ANT_SVG;
+  const trail = el('div', 'trail'); trail.append(fill, ant);
+  info.append(fn, meta, trail); card.append(tile, info);
+  return { card, meta, trail, fill, ant };
+}
+const DL_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>';
+
+/* ================================================================
+ * 发送：文字 / 文件（队列 + 背压）
+ * ================================================================ */
+function sendText(){
+  const input = $('#input');
+  const text = input.value.trim();
+  if (!text || !dc || dc.readyState !== 'open') return;
+  dc.send(JSON.stringify({ t: 'text', id: nowId(), text, ts: Date.now() }));
+  bubbleRow(true, text, fmtTime(Date.now()));
+  input.value = '';
+}
+$('#btn-send').addEventListener('click', sendText);
+$('#input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.isComposing) sendText();   // IME 组字中不误发
+});
+
+$('#btn-file').addEventListener('click', () => $('#file-input').click());
+$('#file-input').addEventListener('change', e => { queueFiles(e.target.files); e.target.value = ''; });
+
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  if (dc && dc.readyState === 'open') queueFiles(e.dataTransfer.files);
+});
+
+function queueFiles(list){
+  for (const f of list) {
+    if (f.size > MAX_FILE) { toast(`「${f.name}」超过 2GB，暂不支持`, true); continue; }
+    const ui = fileCard(kindOf(f.name), f.name);
+    const r = bubbleRow(true, ui.card, fmtTime(Date.now()) + ' · 排队中');
+    ui.meta.textContent = '0 B / ' + fmtBytes(f.size);
+    sendQ.push({ file: f, ui, timeEl: r.time });
+  }
+  pump();
+}
+
+async function pump(){
+  if (pumping) return;
+  pumping = true;
+  while (sendQ.length) {
+    const job = sendQ.shift();
+    try { await sendFile(job); }
+    catch (e) {
+      job.ui.trail.remove();
+      job.ui.meta.textContent = '发送中断：' + (e.message || '连接关闭');
+      job.timeEl.textContent = fmtTime(Date.now()) + ' · 失败';
+    }
+  }
+  pumping = false;
+}
+function waitDrain(){
+  // 缓冲落到低水位、或连接关闭（此时也要放行，让发送循环自行报错）时解决
+  return new Promise(res => {
+    const done = () => { dc.removeEventListener('bufferedamountlow', done); dc.removeEventListener('close', done); res(); };
+    dc.addEventListener('bufferedamountlow', done);
+    dc.addEventListener('close', done);
+  });
+}
+async function sendFile({ file, ui, timeEl }){
+  timeEl.textContent = fmtTime(Date.now()) + ' · 传输中';
+  ui.meta.textContent = '0 B / ' + fmtBytes(file.size);
+  const fileId = nowId();
+  dc.send(JSON.stringify({ t: 'file-meta', id: fileId, name: file.name, size: file.size, mime: file.type || 'application/octet-stream' }));
+  let sent = 0, startedAt = 0, tick = 0;
+  while (sent < file.size) {
+    const block = await file.slice(sent, Math.min(sent + BLOCK, file.size)).arrayBuffer();
+    for (let off = 0; off < block.byteLength; off += CHUNK) {
+      if (!dc || dc.readyState !== 'open') throw new Error('连接已关闭');
+      if (dc.bufferedAmount > BUF_HIGH) await waitDrain();
+      dc.send(block.slice(off, Math.min(off + CHUNK, block.byteLength)));
+      sent += Math.min(CHUNK, block.byteLength - off);
+      if ((++tick & 31) === 0) {   // 每 32 块刷新一次进度
+        const pct = file.size ? Math.min(100, sent / file.size * 100) : 100;
+        ui.fill.style.width = pct + '%'; ui.ant.style.left = pct + '%';
+        if (!startedAt) startedAt = performance.now();
+        const speed = sent / Math.max(0.35, (performance.now() - startedAt) / 1000);
+        ui.meta.textContent = `${fmtBytes(sent)} / ${fmtBytes(file.size)} · ${fmtBytes(speed)}/s`;
+      }
+    }
+  }
+  dc.send(JSON.stringify({ t: 'file-end', id: fileId }));
+  ui.fill.style.width = '100%'; ui.ant.style.left = '100%';
+  ui.meta.textContent = fmtBytes(file.size);
+  timeEl.textContent = fmtTime(Date.now()) + ' · 对方已收到 ✓';
+  ui.trail.remove();
+}
+
+/* ================================================================
+ * 接收：meta → 二进制块 → end → 保存
+ * ================================================================ */
+let incoming = null;
+function onControl(m){
+  if (m.t === 'hello') {
+    if (m.name && m.name !== peerName) { peerName = m.name; peerHue = hueOf(m.name); }
+    if (!$('#chat').hidden) $('#sub').textContent = '与 ' + peerName + ' 直连中 · 零服务端';
+    return;
+  }
+  if (m.t === 'text') { bubbleRow(false, m.text, fmtTime(m.ts || Date.now())); return; }
+  if (m.t === 'file-meta') {
+    const ui = fileCard(kindOf(m.name), m.name);
+    bubbleRow(false, ui.card, fmtTime(Date.now()) + ' · 接收中');
+    ui.meta.textContent = '0 B / ' + fmtBytes(m.size);
+    incoming = { id: m.id, name: m.name, size: m.size, mime: m.mime, got: 0, chunks: [], ui, startedAt: 0 };
+    return;
+  }
+  if (m.t === 'file-end') {
+    if (!incoming) return;
+    const inc = incoming; incoming = null;
+    const blob = new Blob(inc.chunks, { type: inc.mime });
+    const ui = inc.ui;
+    ui.trail.remove();
+    ui.meta.textContent = fmtBytes(blob.size);
+    const btn = el('button', 'file-dl'); btn.title = '保存'; btn.setAttribute('aria-label', '保存 ' + inc.name);
+    btn.innerHTML = DL_ICON;
+    btn.addEventListener('click', () => saveBlob(blob, inc.name));
+    ui.card.append(btn);
+    // 上一条消息的时间行改"已接收"
+    const rows = msgs.querySelectorAll('.msg:not(.mine)');
+    const timeEl = rows[rows.length - 1]?.querySelector('.msg-time');
+    if (timeEl) timeEl.textContent = fmtTime(Date.now()) + ' · 已接收';
+    window.__antify.files.push({ name: inc.name, size: blob.size, mime: inc.mime, blob });
+    toast('收到文件：' + inc.name);
+    if (dc && dc.readyState === 'open') dc.send(JSON.stringify({ t: 'file-ack', id: inc.id }));
+    return;
+  }
+  if (m.t === 'file-ack') { /* 发送侧进度已按发送完成展示；ACK 用于将来的重传协议扩展 */ }
+}
+function onChunk(buf){
+  if (!incoming) return;
+  incoming.got += buf.byteLength;
+  incoming.chunks.push(buf);
+  const { ui } = incoming;
+  const pct = incoming.size ? Math.min(100, incoming.got / incoming.size * 100) : 100;
+  ui.fill.style.width = pct + '%'; ui.ant.style.left = pct + '%';
+  if (!incoming.startedAt) incoming.startedAt = performance.now();
+  if ((incoming.chunks.length & 63) === 0 || incoming.got >= incoming.size) {
+    const speed = incoming.got / Math.max(0.35, (performance.now() - incoming.startedAt) / 1000);
+    ui.meta.textContent = `${fmtBytes(incoming.got)} / ${fmtBytes(incoming.size)} · ${fmtBytes(speed)}/s`;
+  }
+}
+async function saveBlob(blob, name){
+  // 优先 File System Access（可选目录、不占内存二次拷贝），否则 <a download>
+  if (window.showSaveFilePicker) {
+    try {
+      const handle = await showSaveFilePicker({ suggestedName: name });
+      const w = await handle.createWritable();
+      await w.write(blob); await w.close();
+      toast('已保存：' + name);
+      return;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;   // 用户取消
+      // 其余错误走兜底下载
+    }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  toast('已开始下载：' + name);
+}
+
+/* ---------- 初始化 ---------- */
+setState('', '未配对');
+window.addEventListener('beforeunload', () => { try { dc && dc.close(); pc && pc.close(); } catch (e) {} });
+</script>
+</body>
+</html>
