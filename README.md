@@ -51,7 +51,10 @@ antify-rs send --text "hi" --host 192.168.1.5:53317   # 直连发送
 
 `serve` 常用参数：`--port` / `--alias` / `--dir <下载目录>` / `--no-multicast` / `--ui-port <本机面板>`。
 
-桌面窗口即控制台：设备卡片、发文本/发文件、接收进度、事件日志一屏全览。
+桌面窗口即控制台：左侧深色栏自动列出附近设备（拖文件到设备行即发送），
+右侧为聊天式会话——文本/文件按气泡呈现、收到的文件可一键「显示」、活动传输是会话流内吸顶进度卡，
+最下面是聊天输入条（📎 选文件 / Enter 发文本）；无设备时两侧同示「等待设备上线」；深色模式跟随系统。
+会话记录保存在内存（重启清空，不落盘）。
 数据面板由节点本机 `127.0.0.1:53318`（明文 HTTP，仅本机）提供，LocalSend 协议走标准 `53317` HTTPS。
 
 ---
@@ -97,7 +100,7 @@ rust/
 │   ├── server.rs   axum：LocalSend v2 端点（/info /register /prepare-upload /upload /cancel）+ 面板 API
 │   ├── client.rs   发送端（prepare-upload → 流式 upload，断点计数）
 │   ├── state.rs    共享状态：设备表 / 会话 / 进度 / 事件流
-│   └── ui.rs       面板单页（暖纸蚁巢主题，零外部依赖）
+│   └── ui.rs       面板分栏页（深色侧栏设备列表 + 聊天式会话视图，零外部依赖）
 ├── gui/            Tauri v2 桌面壳（窗口加载本机面板，后台跑节点）
 ├── dist-windows/   Windows 下载说明（exe 由 CI 产出）
 ├── build-app.sh    macOS 打包脚本 → AntifyBot.app

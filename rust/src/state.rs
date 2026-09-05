@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -57,6 +57,8 @@ pub struct Session {
     pub id: String,
     pub sender_ip: IpAddr,
     pub sender_alias: String,
+    /// 发送方 prepare-upload info 里的指纹（会话流归因用；同机测试/NAT 下比 IP 可靠）
+    pub sender_fp: String,
     pub files: HashMap<String, IncomingFile>,
     /// 最近一次活动（prepare / upload）；超时未动自动回收，防止发送方崩溃后锁死
     pub last_active: tokio::time::Instant,
@@ -82,6 +84,26 @@ pub struct SendProgress {
     pub started_at: u64,
 }
 
+/// 会话流里的一条消息（右侧聊天视图的数据源；仅内存，重启即清）
+#[derive(Clone, Serialize)]
+pub struct ChatMsg {
+    pub id: u64,
+    /// true = 我方发出
+    pub out: bool,
+    /// 对端指纹（收到时按来源 IP 反查设备表；查不到退化为 IP 字符串）
+    pub peer: String,
+    /// 发生时的对端别名快照（设备改名/离线后气泡仍可读）
+    pub peer_alias: String,
+    /// "text" | "file"
+    pub kind: String,
+    pub text: String,
+    pub name: String,
+    pub size: u64,
+    pub at: u64,
+    /// 已收文件名（相对下载目录，可「显示」）；出站为空
+    pub file: String,
+}
+
 pub struct AppState {
     pub identity: crate::config::Identity,
     pub devices: Mutex<HashMap<String, Device>>,
@@ -89,6 +111,10 @@ pub struct AppState {
     pub received: Mutex<Vec<ReceivedFile>>,
     pub events: Mutex<VecDeque<(u64, String)>>,
     pub sending: Mutex<SendProgress>,
+    /// 会话流（右侧聊天视图）：每个设备一条线程，按 peer 过滤
+    pub chat: Mutex<Vec<ChatMsg>>,
+    /// 会话消息自增序号
+    pub chat_seq: AtomicU64,
     /// 面板中转发送的实时字节计数（SendProgress 里的是快照，此处原子累加）
     pub relay_bytes: AtomicU64,
     /// 接收侧当前文件进度（upload 处理器实时更新）
@@ -114,6 +140,17 @@ impl AppState {
         ev.push_back((now_ms(), line));
         while ev.len() > 200 {
             ev.pop_front();
+        }
+    }
+
+    /// 会话流追加一条（内存环形，仅保留最近 500 条）
+    pub async fn push_chat(&self, mut m: ChatMsg) {
+        m.id = self.chat_seq.fetch_add(1, Ordering::Relaxed);
+        let mut c = self.chat.lock().await;
+        c.push(m);
+        let overflow = c.len().saturating_sub(500);
+        if overflow > 0 {
+            c.drain(..overflow);
         }
     }
 

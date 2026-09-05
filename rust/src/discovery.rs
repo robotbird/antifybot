@@ -1,12 +1,19 @@
 //! UDP 多播发现：224.0.0.167:53317
 //! 收到他人公告 → 记入设备表 → 回一个 HTTP register（对方响应里带回它的最新信息）
 //! 自己启动时发公告爆发（100/500/2000ms × 3 包），之后每 2 分钟重发保持可见
+//!
+//! 接口热变化：Wi-Fi 漫游 / 热点重编号 / 虚拟机网桥启停都会让启动时枚举的地址失效
+//! （入组与出口接口都钉死在旧地址上，节点从此失聪）。因此每 15s 重枚举一次，
+//! 集合有变就热替换收发 socket —— 接收 socket 重建时靠 REUSEPORT 无缝共存，无收包空窗。
 use crate::config::{MULTICAST_GROUP, DEFAULT_PORT};
 use crate::state::{now_ms, Device, Shared};
 use anyhow::Result;
 use serde::Deserialize;
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::UdpSocket;
+use tokio::sync::{RwLock, watch};
 
 /// 收到的多播消息（v2，宽松解析：老版本可缺 deviceModel/download 等）
 #[derive(Debug, Deserialize)]
@@ -41,32 +48,21 @@ pub async fn start(state: Shared, client: reqwest::Client, multicast_port: Optio
     // 多播走遍所有网段：NAT 内的虚拟机网桥（bridge100 / vmnet8 / 10.211.55.x）
     // 与物理网卡互不可达（多播 TTL=1 不穿 NAT），但都直连本机 —— 每个接口各自收发即可互通
     let ifaces = mcast_interfaces();
-    let mut send_socks: Vec<std::sync::Arc<tokio::net::UdpSocket>> = Vec::new();
-    for ip in &ifaces {
-        if let Ok(t) = tokio::net::UdpSocket::from_std(send_socket(Some(*ip))) {
-            send_socks.push(std::sync::Arc::new(t));
-        }
-    }
-    if send_socks.is_empty() {
-        // 兜底：交给系统默认接口
-        send_socks.push(std::sync::Arc::new(tokio::net::UdpSocket::from_std(send_socket(None))?));
-    }
+    let send_socks = Arc::new(RwLock::new(build_send_socks(&ifaces)));
+    let (recv_tx, recv_rx) = watch::channel(bind_recv(&state, mport, &ifaces).await);
 
-    // 端口被独占（如 Windows 上官方 App 未设复用）时退化为「只公告不监听」：
-    // 公告仍发往 224.0.0.167:mport，对端经 register（TCP，走公告载荷里的端口）回礼
-    let recv = match bind_socket(mport, &ifaces) {
-        Ok(s) => Some(std::sync::Arc::new(tokio::net::UdpSocket::from_std(s)?)),
-        Err(e) => {
-            state
-                .log_event(format!("UDP {mport} 被占用（{e}），退化为只公告、不监听多播"))
-                .await;
-            None
-        }
-    };
+    // 接口监视器：集合变化 → 热替换收发 socket（含降级模式的自动恢复）
+    tokio::spawn(watch_interfaces(
+        state.clone(),
+        mport,
+        send_socks.clone(),
+        recv_tx,
+        ifaces,
+    ));
 
     let my_fp = state.identity.fingerprint.clone();
     // 收到陌生公告时的"回敬公告"限流：避免多设备同时在线时风暴
-    let last_reannounce = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let last_reannounce = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // 公告爆发 + 周期重发
     tokio::spawn({
@@ -76,25 +72,39 @@ pub async fn start(state: Shared, client: reqwest::Client, multicast_port: Optio
             loop {
                 for delay in [100u64, 500, 2000] {
                     tokio::time::sleep(Duration::from_millis(delay)).await;
-                    announce_once(&state, &socks, group).await;
+                    announce_once(&state, &socks.read().await, group).await;
                 }
                 tokio::time::sleep(Duration::from_secs(120)).await;
             }
         }
     });
 
-    // 接收循环（降级模式下挂起，只靠上面的公告任务）
-    let Some(sock) = recv else {
-        std::future::pending::<()>().await;
-        return Ok(());
-    };
+    // 接收循环：socket 可被监视器热替换；None = 端口暂被占用（只公告），等它换回新的
+    let mut recv_rx = recv_rx;
+    let mut cur = recv_rx.borrow_and_update().clone();
     let mut buf = vec![0u8; 65536];
     loop {
-        let (n, src) = match sock.recv_from(&mut buf).await {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("[发现] 接收失败: {e}，1s 后重试");
-                tokio::time::sleep(Duration::from_secs(1)).await;
+        let sock = match cur.clone() {
+            Some(s) => s,
+            None => {
+                if recv_rx.changed().await.is_err() {
+                    return Ok(()); // 监视器任务没了（不应发生）
+                }
+                cur = recv_rx.borrow_and_update().clone();
+                continue;
+            }
+        };
+        let (n, src) = tokio::select! {
+            r = sock.recv_from(&mut buf) => match r {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[发现] 接收失败: {e}，1s 后重试");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            },
+            _ = recv_rx.changed() => {
+                cur = recv_rx.borrow_and_update().clone();
                 continue;
             }
         };
@@ -145,16 +155,102 @@ pub async fn start(state: Shared, client: reqwest::Client, multicast_port: Optio
                 .is_ok()
         {
             let st = state.clone();
-            let socks2 = send_socks.clone();
+            let socks = send_socks.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(150)).await;
-                announce_once(&st, &socks2, group).await;
+                announce_once(&st, &socks.read().await, group).await;
             });
         }
     }
 }
 
-async fn announce_once(state: &Shared, socks: &[std::sync::Arc<tokio::net::UdpSocket>], group: std::net::SocketAddr) {
+/// 周期重枚举接口；集合变化、或接收 socket 缺位（端口被独占的降级模式）时重建。
+/// 端口释放、Wi-Fi 漫游、虚拟机网桥启停都会在这里被自动接住。
+async fn watch_interfaces(
+    state: Shared,
+    mport: u16,
+    send_socks: Arc<RwLock<Vec<Arc<UdpSocket>>>>,
+    recv_tx: watch::Sender<Option<Arc<UdpSocket>>>,
+    mut last: Vec<Ipv4Addr>,
+) {
+    let mut have_recv = recv_tx.borrow().is_some();
+    loop {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        let ifaces = mcast_interfaces();
+        if ifaces == last && have_recv {
+            continue;
+        }
+        if ifaces != last {
+            eprintln!(
+                "[发现] 网络接口变化：{last:?} → {ifaces:?}，重建多播收发"
+            );
+            *send_socks.write().await = build_send_socks(&ifaces);
+        }
+        let new_recv = match bind_socket(mport, &ifaces) {
+            Ok(s) => UdpSocket::from_std(s).ok().map(Arc::new),
+            Err(e) => {
+                if have_recv {
+                    // 只在状态翻转时记事件，避免长期占用期间刷屏
+                    state
+                        .log_event(format!("UDP {mport} 被占用（{e}），暂只公告不监听，稍后自动重试"))
+                        .await;
+                }
+                None
+            }
+        };
+        if new_recv.is_some() && !have_recv {
+            state.log_event("多播监听已恢复").await;
+        }
+        if ifaces != last {
+            state
+                .log_event(format!(
+                    "网络接口变化，多播收发已切换到 {}",
+                    if ifaces.is_empty() {
+                        "系统默认接口".to_string()
+                    } else {
+                        ifaces.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(", ")
+                    }
+                ))
+                .await;
+        }
+        have_recv = new_recv.is_some();
+        let _ = recv_tx.send(new_recv);
+        last = ifaces;
+    }
+}
+
+/// 每个接口一个出口 socket（不绑定端口，源端口由系统分配；
+/// 接收方回礼走 TCP，用的是公告载荷里的 HTTPS 端口，与 UDP 源端口无关）
+fn build_send_socks(ifaces: &[Ipv4Addr]) -> Vec<Arc<UdpSocket>> {
+    let mut socks = Vec::new();
+    for ip in ifaces {
+        if let Ok(t) = UdpSocket::from_std(send_socket(Some(*ip))) {
+            socks.push(Arc::new(t));
+        }
+    }
+    if socks.is_empty() {
+        // 兜底：交给系统默认接口
+        if let Ok(t) = UdpSocket::from_std(send_socket(None)) {
+            socks.push(Arc::new(t));
+        }
+    }
+    socks
+}
+
+/// 绑定 UDP 多播接收 socket；被独占时返回 None（降级为只公告，watcher 稍后重试）。
+async fn bind_recv(state: &Shared, mport: u16, ifaces: &[Ipv4Addr]) -> Option<Arc<UdpSocket>> {
+    match bind_socket(mport, ifaces) {
+        Ok(s) => UdpSocket::from_std(s).ok().map(Arc::new),
+        Err(e) => {
+            state
+                .log_event(format!("UDP {mport} 被占用（{e}），暂只公告不监听，稍后自动重试"))
+                .await;
+            None
+        }
+    }
+}
+
+async fn announce_once(state: &Shared, socks: &[Arc<UdpSocket>], group: std::net::SocketAddr) {
     let payload = state.identity.announce_json(true).to_string();
     for sock in socks {
         if let Err(e) = sock.send_to(payload.as_bytes(), group).await {
@@ -260,8 +356,7 @@ fn bind_socket(port: u16, ifaces: &[Ipv4Addr]) -> Result<std::net::UdpSocket> {
     Ok(sock.into())
 }
 
-/// 指定出口接口的公告 socket（不绑定端口，源端口由系统分配；
-/// 接收方回礼走 TCP，用的是公告载荷里的 HTTPS 端口，与 UDP 源端口无关）
+/// 指定出口接口的公告 socket
 fn send_socket(iface: Option<Ipv4Addr>) -> std::net::UdpSocket {
     use socket2::{Domain, Protocol, Socket, Type};
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).expect("创建 UDP socket");

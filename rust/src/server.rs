@@ -193,6 +193,11 @@ async fn prepare_upload(
         .and_then(|v| v.as_str())
         .unwrap_or("未知设备")
         .to_string();
+    let sender_fp = info
+        .get("fingerprint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let Some(files_raw) = body.get("files").and_then(|v| v.as_object()) else {
         return err_json(StatusCode::BAD_REQUEST, "缺少 files");
     };
@@ -230,6 +235,7 @@ async fn prepare_upload(
             id: session_id.clone(),
             sender_ip: peer.ip(),
             sender_alias: sender_alias.clone(),
+            sender_fp,
             files,
             last_active: tokio::time::Instant::now(),
         });
@@ -389,6 +395,42 @@ async fn upload(
             at: now_ms(),
             file: file_name_final.clone(),
         });
+    // 会话流归因：优先 prepare 时记下的发送方指纹（同机测试/NAT 下 IP 对不上），
+    // 缺失再按来源 IP 反查设备表，仍查不到用 IP 字符串占位（气泡不丢）
+    let (sender_alias, fp_hint) = {
+        let slot = state.session.lock().await;
+        let s = slot.as_ref();
+        (
+            s.map(|s| s.sender_alias.clone()).unwrap_or_default(),
+            s.map(|s| s.sender_fp.clone()).unwrap_or_default(),
+        )
+    };
+    let sender_fp = if !fp_hint.is_empty() {
+        fp_hint
+    } else {
+        state
+            .devices
+            .lock()
+            .await
+            .values()
+            .find(|d| d.ip == peer.ip())
+            .map(|d| d.fingerprint.clone())
+            .unwrap_or_else(|| peer.ip().to_string())
+    };
+    state
+        .push_chat(crate::state::ChatMsg {
+            id: 0,
+            out: false,
+            peer: sender_fp,
+            peer_alias: sender_alias,
+            kind: "file".into(),
+            text: String::new(),
+            name: file_name_final.clone(),
+            size: got,
+            at: now_ms(),
+            file: file_name_final.clone(),
+        })
+        .await;
     state
         .log_event(format!("已接收 {}（{} 字节，来自本会话）", file_name_final, got))
         .await;
@@ -452,6 +494,7 @@ async fn ui_state(State(state): State<Shared>) -> Response {
                 json!({
                     "fingerprint": d.fingerprint,
                     "alias": d.alias,
+                    "ip": d.ip.to_string(),
                     "addr": format!("{}:{}", d.ip, d.port),
                     "https": d.https,
                     "deviceType": d.device_type.clone().unwrap_or_else(|| "?".into()),
@@ -483,6 +526,7 @@ async fn ui_state(State(state): State<Shared>) -> Response {
             Some(s) => json!({
                 "active": true,
                 "sender": s.sender_alias,
+                "senderIp": s.sender_ip.to_string(),
                 "current": {
                     "name": *state.rx_name.lock().await,
                     "got": state.rx_bytes.load(Ordering::Relaxed),
@@ -496,6 +540,21 @@ async fn ui_state(State(state): State<Shared>) -> Response {
         }
     };
     let sending = state.sending.lock().await.clone();
+    let chat: Vec<serde_json::Value> = {
+        let c = state.chat.lock().await;
+        c.iter()
+            .rev()
+            .take(200)
+            .rev()
+            .map(|m| {
+                json!({
+                    "id": m.id, "out": m.out, "peer": m.peer, "alias": m.peer_alias,
+                    "kind": m.kind, "text": m.text, "name": m.name, "size": m.size,
+                    "at": m.at, "file": m.file,
+                })
+            })
+            .collect()
+    };
 
     Json(json!({
         "me": {
@@ -510,6 +569,7 @@ async fn ui_state(State(state): State<Shared>) -> Response {
         "events": events,
         "session": session,
         "sending": sending,
+        "chat": chat,
     }))
     .into_response()
 }
@@ -624,6 +684,20 @@ async fn ui_send(
     match result {
         Ok(r) if r.status().is_success() => {
             state.log_event(format!("已送达「{}」：{}", target.alias, name)).await;
+            state
+                .push_chat(crate::state::ChatMsg {
+                    id: 0,
+                    out: true,
+                    peer: target.fingerprint.clone(),
+                    peer_alias: target.alias.clone(),
+                    kind: "file".into(),
+                    text: String::new(),
+                    name: name.clone(),
+                    size,
+                    at: now_ms(),
+                    file: String::new(),
+                })
+                .await;
             Json(json!({"ok": true})).into_response()
         }
         Ok(r) => {
@@ -649,8 +723,25 @@ async fn ui_send_text(State(state): State<Shared>, axum::Json(body): axum::Json<
         return err_json(StatusCode::NOT_FOUND, "目标设备不存在");
     };
     let item = crate::client::item_from_text(body.text.clone());
+    let sent_text = body.text.clone();
     match crate::client::send(&state, &http_client(), &target, vec![item]).await {
-        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Ok(()) => {
+            state
+                .push_chat(crate::state::ChatMsg {
+                    id: 0,
+                    out: true,
+                    peer: target.fingerprint.clone(),
+                    peer_alias: target.alias.clone(),
+                    kind: "text".into(),
+                    text: sent_text,
+                    name: String::new(),
+                    size: 0,
+                    at: now_ms(),
+                    file: String::new(),
+                })
+                .await;
+            Json(json!({"ok": true})).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_GATEWAY, &format!("{e:#}")),
     }
 }
@@ -756,6 +847,8 @@ pub fn new_state(identity: crate::config::Identity) -> Shared {
         received: Default::default(),
         events: Default::default(),
         sending: Default::default(),
+        chat: Default::default(),
+        chat_seq: Default::default(),
         relay_bytes: Default::default(),
         rx_bytes: Default::default(),
         rx_total: Default::default(),

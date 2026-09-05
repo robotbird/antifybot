@@ -39,9 +39,9 @@ fn main() {
                 .parse()
                 .map_err(|e| format!("面板 URL 解析失败: {e}"))?;
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-                .title("AntifyBot · LocalSend 节点")
-                .inner_size(1100.0, 840.0)
-                .min_inner_size(880.0, 620.0)
+                .title("AntifyBot")
+                .inner_size(900.0, 680.0)
+                .min_inner_size(720.0, 540.0)
                 .build()?;
             Ok(())
         })
