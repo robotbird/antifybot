@@ -4,7 +4,8 @@ $ErrorActionPreference = "Stop"
 Set-Location "$PSScriptRoot"
 
 Write-Host "-- 1/2 release 构建"
-cargo build --release
+# --workspace：根目录的 cargo build 默认只构建根包，gui 成员必须显式带上
+cargo build --release --workspace
 
 Write-Host "-- 2/2 产物"
 $cli = "target\release\antify-rs.exe"

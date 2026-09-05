@@ -27,8 +27,8 @@ jobs:
         with:
           workspaces: rust
 
-      - name: 构建（release）
-        run: cargo build --release
+      - name: 构建（release，含 gui 成员）
+        run: cargo build --release --workspace
 
       - name: 打包
         shell: pwsh
