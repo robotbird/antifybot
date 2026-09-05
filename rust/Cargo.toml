@@ -1,0 +1,43 @@
+[workspace]
+members = ["gui"]
+
+[package]
+name = "antify-rs"
+version = "1.0.0"
+edition = "2021"
+description = "AntifyBot Rust 节点：LocalSend v2 协议实现（发现 / 接收 / 发送）"
+
+[lib]
+name = "antify_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "antify-rs"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+# no-provider 变体：加密后端由我们自己 install 的 ring 提供（避免 aws-lc-rs 的 CMake/Ninja 构建依赖，Windows 更友好）
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+rcgen = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+uuid = { version = "1", features = ["v4"] }
+dirs = "6"
+gethostname = "0.5"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+# 跨平台 socket 选项（REUSEADDR/REUSEPORT、多播）：替代 Unix 专属的 libc 调用，Windows 可编译
+socket2 = "0.6"
+
+[profile.release]
+strip = true
+lto = true

@@ -1,0 +1,13 @@
+[package]
+name = "antify-gui"
+version = "1.0.0"
+edition = "2021"
+description = "AntifyBot 桌面壳（Tauri v2）：内嵌 LocalSend 节点 + 面板窗口"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+antify-rs = { path = ".." }
+axum-server = "0.7"

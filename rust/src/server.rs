@@ -1,0 +1,764 @@
+//! HTTPS 服务器：LocalSend v2 API（官方 App 可直接发文件给我们）+ 面板 API
+use crate::state::{now_ms, Device, IncomingFile, ReceivedFile, Session, Shared};
+use axum::extract::{ConnectInfo, Query, Request, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{Html, IntoResponse, Json, Response};
+use axum::routing::{get, post};
+use axum::Router;
+use futures_util::StreamExt;
+use serde::Deserialize;
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
+
+pub fn build_router(state: Shared) -> Router {
+    Router::new()
+        // ---- LocalSend v2 协议端点（官方 App 兼容） ----
+        .route("/api/localsend/v2/info", get(info))
+        .route("/api/localsend/v1/info", get(info))
+        .route("/api/localsend/v2/register", post(register))
+        .route("/api/localsend/v2/prepare-upload", post(prepare_upload))
+        .route("/api/localsend/v2/upload", post(upload))
+        .route("/api/localsend/v2/cancel", post(cancel))
+        .route("/api/localsend/v2/cancel-upload", post(cancel)) // 旧草案别名
+        // ---- 面板 ----
+        .route("/", get(dashboard))
+        .route("/api/ui/state", get(ui_state))
+        .route("/api/ui/send", post(ui_send))
+        .route("/api/ui/send-text", post(ui_send_text))
+        .route("/api/ui/add", post(ui_add))
+        .route("/api/ui/reveal", post(ui_reveal))
+        .with_state(state)
+}
+
+/// 面板的明文 HTTP 版（仅 127.0.0.1）：给 Tauri WebView 用，避免自签证书弹窗
+pub async fn serve_ui_http(state: Shared, port: u16) -> anyhow::Result<()> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let app = build_router(state).into_make_service_with_connect_info::<SocketAddr>();
+    axum_server::bind(addr)
+        .serve(app)
+        .await
+        .map_err(|e| anyhow::anyhow!("UI HTTP 服务退出: {e}"))
+}
+
+/// 从 preferred 起找一个能绑定的 TCP 端口（0.0.0.0 实测绑定后立即释放）。
+/// Windows 上同机跑官方 LocalSend 时 53317 会被占用：协议允许任意端口
+/// （多播公告 / register 载荷携带真实端口），顺延即可互通。
+pub fn pick_free_port(preferred: u16) -> u16 {
+    let mut port = preferred;
+    for _ in 0..32 {
+        if std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() {
+            return port;
+        }
+        port = port.saturating_add(1);
+    }
+    // 连续 32 个都被占：交给操作系统随机分配
+    std::net::TcpListener::bind(("0.0.0.0", 0))
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .unwrap_or(preferred)
+}
+
+/// axum-server + 自签 rustls（LocalSend 语义：客户端不校验证书）
+pub async fn serve(state: Shared) -> anyhow::Result<()> {
+    let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+        state.identity.cert_pem.clone(),
+        state.identity.key_pem.clone(),
+    )
+    .await?;
+    let addr = SocketAddr::from(([0, 0, 0, 0], state.identity.port));
+    let app = build_router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
+    // 会话清扫：发送方崩溃/不取消时，60 秒无活动自动回收，避免锁死后续接收
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                let slot = st.session.lock().await;
+                if let Some(s) = slot.as_ref() {
+                    if s.last_active.elapsed() > std::time::Duration::from_secs(60) {
+                        let alias = s.sender_alias.clone();
+                        drop(slot);
+                        *st.session.lock().await = None;
+                        st.log_event(format!("「{alias}」的会话 60 秒无活动，自动回收")).await;
+                    }
+                }
+            }
+        });
+    }
+
+    axum_server::bind_rustls(addr, tls)
+        .serve(app)
+        .await
+        .map_err(|e| anyhow::anyhow!("HTTPS 服务退出: {e}"))
+}
+
+fn err_json(status: StatusCode, msg: &str) -> Response {
+    (status, Json(json!({ "error": msg }))).into_response()
+}
+
+// ═══════════════ v2 协议端点 ═══════════════
+
+async fn info(State(state): State<Shared>) -> Response {
+    let id = &state.identity;
+    Json(json!({
+        "alias": id.alias,
+        "version": crate::config::PROTOCOL_VERSION,
+        "deviceModel": id.device_model,
+        "deviceType": "headless",
+        "fingerprint": id.fingerprint,
+        "download": false,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct RegisterIn {
+    #[serde(default)]
+    #[allow(dead_code)]
+    alias: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    device_model: Option<String>,
+    #[serde(default)]
+    device_type: Option<String>,
+    #[serde(default)]
+    fingerprint: String,
+    #[serde(default = "default_port")]
+    port: u16,
+    #[serde(default = "default_https")]
+    protocol: String,
+    #[serde(default)]
+    download: bool,
+}
+fn default_port() -> u16 {
+    53317
+}
+fn default_https() -> String {
+    "https".to_string()
+}
+
+async fn register(
+    State(state): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Response {
+    // 宽松解析：容忍字段缺失的异构实现
+    let Ok(reg) = serde_json::from_value::<RegisterIn>(body.clone()) else {
+        return err_json(StatusCode::BAD_REQUEST, "register 请求体无法解析");
+    };
+    if !reg.fingerprint.is_empty() {
+        let device = Device {
+            fingerprint: reg.fingerprint.clone(),
+            alias: reg.alias.clone(),
+            ip: peer.ip(),
+            port: reg.port,
+            https: reg.protocol.eq_ignore_ascii_case("https"),
+            device_model: reg.device_model,
+            device_type: reg.device_type,
+            version: reg.version,
+            download: reg.download,
+            last_seen: now_ms(),
+        };
+        state
+            .log_event(format!("「{}」注册进来（{}）", device.alias, peer.ip()))
+            .await;
+        state.devices.lock().await.insert(reg.fingerprint, device);
+    }
+    let id = &state.identity;
+    Json(json!({
+        "alias": id.alias,
+        "version": crate::config::PROTOCOL_VERSION,
+        "deviceModel": id.device_model,
+        "deviceType": "headless",
+        "fingerprint": id.fingerprint,
+        "download": false,
+    }))
+    .into_response()
+}
+
+async fn prepare_upload(
+    State(state): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Response {
+    let info = body.get("info").cloned().unwrap_or(json!({}));
+    let sender_alias = info
+        .get("alias")
+        .and_then(|v| v.as_str())
+        .unwrap_or("未知设备")
+        .to_string();
+    let Some(files_raw) = body.get("files").and_then(|v| v.as_object()) else {
+        return err_json(StatusCode::BAD_REQUEST, "缺少 files");
+    };
+    if files_raw.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "没有文件");
+    }
+
+    let mut files = HashMap::new();
+    for (id, f) in files_raw {
+        let name = f.get("fileName").and_then(|v| v.as_str()).unwrap_or("file");
+        files.insert(
+            id.clone(),
+            IncomingFile {
+                token: uuid::Uuid::new_v4().to_string(),
+                file_name: name.to_string(),
+                size: f.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+                sha256: f
+                    .get("sha256")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+                done: false,
+                attempts: 0,
+            },
+        );
+    }
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    {
+        let mut slot = state.session.lock().await;
+        if slot.is_some() {
+            return err_json(StatusCode::CONFLICT, "Blocked by another session");
+        }
+        *slot = Some(Session {
+            id: session_id.clone(),
+            sender_ip: peer.ip(),
+            sender_alias: sender_alias.clone(),
+            files,
+            last_active: tokio::time::Instant::now(),
+        });
+    }
+    state
+        .log_event(format!(
+            "「{}」请求发送 {} 个文件，已自动接受",
+            sender_alias,
+            files_raw.len()
+        ))
+        .await;
+
+    let tokens: serde_json::Map<String, serde_json::Value> = state
+        .session
+        .lock()
+        .await
+        .as_ref()
+        .map(|s| {
+            s.files
+                .iter()
+                .map(|(id, f)| (id.clone(), json!(f.token)))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Json(json!({
+        "sessionId": session_id,
+        "files": tokens,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct UploadQuery {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    #[serde(rename = "fileId")]
+    file_id: String,
+    token: String,
+}
+
+async fn upload(
+    State(state): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(q): Query<UploadQuery>,
+    _headers: HeaderMap,
+    req: Request,
+) -> Response {
+    // 会话与令牌校验
+    let (file_name, size, sha_expect) = {
+        let mut slot = state.session.lock().await;
+        let Some(session) = slot.as_mut() else {
+            return err_json(StatusCode::FORBIDDEN, "Invalid token or IP address");
+        };
+        if session.id != q.session_id || session.sender_ip != peer.ip() {
+            return err_json(StatusCode::FORBIDDEN, "Invalid token or IP address");
+        }
+        let Some(file) = session.files.get_mut(&q.file_id) else {
+            return err_json(StatusCode::FORBIDDEN, "Invalid token or IP address");
+        };
+        if file.token != q.token || file.done {
+            return err_json(StatusCode::FORBIDDEN, "Invalid token or IP address");
+        }
+        file.attempts += 1;
+        (file.file_name.clone(), file.size, file.sha256.clone())
+    };
+    {
+        // 会话续命：一次上传（含重试）都算活动
+        let mut slot = state.session.lock().await;
+        if let Some(s) = slot.as_mut() {
+            s.last_active = tokio::time::Instant::now();
+        }
+    }
+
+    *state.rx_name.lock().await = file_name.clone();
+    state.rx_total.store(size, Ordering::Relaxed);
+    state.rx_bytes.store(0, Ordering::Relaxed);
+
+    let final_path = state.resolve_path(&file_name);
+    let part_path = {
+        let mut p = final_path.clone().into_os_string();
+        p.push(".part");
+        std::path::PathBuf::from(p)
+    };
+    std::fs::create_dir_all(&state.identity.download_dir).ok();
+    let Ok(mut out) = tokio::fs::File::create(&part_path).await else {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, "无法创建临时文件");
+    };
+
+    let mut stream = req.into_body().into_data_stream();
+    let mut hasher = Sha256::new();
+    let mut got: u64 = 0;
+    let mut io_err: Option<String> = None;
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                hasher.update(&bytes);
+                state.rx_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                got += bytes.len() as u64;
+                if out.write_all(&bytes).await.is_err() {
+                    io_err = Some("写盘失败".into());
+                    break;
+                }
+            }
+            Err(e) => {
+                io_err = Some(format!("接收中断: {e}"));
+                break;
+            }
+        }
+    }
+    let _ = out.flush().await;
+    let _ = out.sync_all().await;
+
+    let sha_got = hex::encode(hasher.finalize());
+    let mut bad = io_err.is_some() || got != size;
+    if !bad {
+        if let Some(expect) = &sha_expect {
+            if !expect.eq_ignore_ascii_case(&sha_got) {
+                bad = true;
+            }
+        }
+    }
+
+    if bad {
+        let _ = tokio::fs::remove_file(&part_path).await;
+        // 校验失败且未超次：保持会话可重试（发送方用同一 token 重传）
+        let mut slot = state.session.lock().await;
+        if let Some(session) = slot.as_mut() {
+            if let Some(f) = session.files.get_mut(&q.file_id) {
+                if f.attempts >= 3 {
+                    f.done = true;
+                }
+            }
+        }
+        state
+            .log_event(format!("接收 {} 失败（{}/{} 字节{}）", file_name, got, size,
+                if sha_expect.is_some() && got == size { "，SHA-256 不一致" } else { "" }))
+            .await;
+        return err_json(StatusCode::UNPROCESSABLE_ENTITY, "Checksum mismatch");
+    }
+
+    if tokio::fs::rename(&part_path, &final_path).await.is_err() {
+        let _ = tokio::fs::remove_file(&part_path).await;
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, "落盘失败");
+    }
+    let file_name_final = final_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| file_name.clone());
+    state
+        .received
+        .lock()
+        .await
+        .push(ReceivedFile {
+            name: file_name_final.clone(),
+            size: got,
+            at: now_ms(),
+            file: file_name_final.clone(),
+        });
+    state
+        .log_event(format!("已接收 {}（{} 字节，来自本会话）", file_name_final, got))
+        .await;
+
+    // 标记完成；全部完成则会话结束
+    let all_done = {
+        let mut slot = state.session.lock().await;
+        let done = slot.as_mut().map(|s| {
+            if let Some(f) = s.files.get_mut(&q.file_id) {
+                f.done = true;
+            }
+            s.files.values().all(|f| f.done)
+        });
+        if done == Some(true) {
+            let sender = slot.as_ref().map(|s| s.sender_alias.clone()).unwrap_or_default();
+            drop(slot);
+            state.log_event(format!("「{}」的传输会话完成", sender)).await;
+            *state.session.lock().await = None;
+            true
+        } else {
+            false
+        }
+    };
+    let _ = all_done;
+
+    StatusCode::OK.into_response()
+}
+
+#[derive(Deserialize)]
+struct CancelQuery {
+    #[serde(rename = "sessionId")]
+    _session_id: Option<String>,
+}
+
+async fn cancel(State(state): State<Shared>, Query(_q): Query<CancelQuery>) -> Response {
+    let had = state.session.lock().await.take().is_some();
+    if had {
+        state.log_event("对方取消了传输会话").await;
+    }
+    StatusCode::OK.into_response()
+}
+
+// ═══════════════ 面板 API ═══════════════
+
+async fn dashboard() -> Html<&'static str> {
+    Html(crate::ui::DASHBOARD)
+}
+
+async fn ui_state(State(state): State<Shared>) -> Response {
+    let id = &state.identity;
+    let devices: Vec<serde_json::Value> = {
+        let devices = state.devices.lock().await;
+        let now = now_ms();
+        let mut list: Vec<&Device> = devices
+            .values()
+            .filter(|d| now.saturating_sub(d.last_seen) < 300_000)
+            .collect();
+        list.sort_by(|a, b| a.alias.cmp(&b.alias));
+        list.iter()
+            .map(|d| {
+                json!({
+                    "fingerprint": d.fingerprint,
+                    "alias": d.alias,
+                    "addr": format!("{}:{}", d.ip, d.port),
+                    "https": d.https,
+                    "deviceType": d.device_type.clone().unwrap_or_else(|| "?".into()),
+                    "version": d.version,
+                    "lastSeenMs": now.saturating_sub(d.last_seen),
+                })
+            })
+            .collect()
+    };
+    let received: Vec<serde_json::Value> = {
+        let rec = state.received.lock().await;
+        rec.iter()
+            .rev()
+            .take(60)
+            .map(|r| json!({ "name": r.name, "size": r.size, "at": r.at, "file": r.file }))
+            .collect()
+    };
+    let events: Vec<serde_json::Value> = {
+        let ev = state.events.lock().await;
+        ev.iter()
+            .rev()
+            .take(40)
+            .map(|(t, s)| json!({ "t": t, "text": s }))
+            .collect()
+    };
+    let session: serde_json::Value = {
+        let slot = state.session.lock().await;
+        match slot.as_ref() {
+            Some(s) => json!({
+                "active": true,
+                "sender": s.sender_alias,
+                "current": {
+                    "name": *state.rx_name.lock().await,
+                    "got": state.rx_bytes.load(Ordering::Relaxed),
+                    "total": state.rx_total.load(Ordering::Relaxed),
+                },
+                "files": s.files.values().map(|f| json!({
+                    "name": f.file_name, "size": f.size, "done": f.done,
+                })).collect::<Vec<_>>(),
+            }),
+            None => json!({"active": false}),
+        }
+    };
+    let sending = state.sending.lock().await.clone();
+
+    Json(json!({
+        "me": {
+            "alias": id.alias,
+            "fingerprint": id.fingerprint,
+            "port": id.port,
+            "version": crate::config::PROTOCOL_VERSION,
+            "dir": id.download_dir.display().to_string(),
+        },
+        "devices": devices,
+        "received": received,
+        "events": events,
+        "session": session,
+        "sending": sending,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct UiSendQuery {
+    target: String,
+    name: Option<String>,
+    size: Option<u64>,
+    mime: Option<String>,
+}
+
+/// 面板中转发送：浏览器把文件流式 POST 给本端，本端边收边转给目标设备（不落盘）
+async fn ui_send(
+    State(state): State<Shared>,
+    Query(q): Query<UiSendQuery>,
+    req: Request,
+) -> Response {
+    let Some(target) = state.devices.lock().await.get(&q.target).cloned() else {
+        return err_json(StatusCode::NOT_FOUND, "目标设备不存在（可能已下线）");
+    };
+    let client = http_client();
+
+    let name = q.name.unwrap_or_else(|| "file.bin".to_string());
+    let size = q.size.unwrap_or(0);
+    let mime = q.mime.unwrap_or_else(|| "application/octet-stream".to_string());
+
+    // 1) prepare-upload
+    let prepare = json!({
+        "info": state.identity.register_json(),
+        "files": { "f0": { "id": "f0", "fileName": name, "size": size, "fileType": mime } },
+    });
+    let resp = match client
+        .post(format!("{}/api/localsend/v2/prepare-upload", target.base_url()))
+        .json(&prepare)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return err_json(StatusCode::BAD_GATEWAY, &format!("联系「{}」失败: {e}", target.alias)),
+    };
+    if !resp.status().is_success() {
+        return err_json(StatusCode::BAD_GATEWAY, &format!("prepare-upload 返回 {}", resp.status()));
+    }
+    let parsed: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return err_json(StatusCode::BAD_GATEWAY, "prepare-upload 响应异常"),
+    };
+    let session_id = parsed.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    let token = parsed
+        .pointer("/files/f0")
+        .and_then(|v| v.as_str())
+        .or_else(|| parsed.pointer("/files/f0/token").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    if session_id.is_empty() || token.is_empty() {
+        return err_json(StatusCode::BAD_GATEWAY, "对方未接受文件");
+    }
+
+    // 2) 边收边转
+    let upload_url = format!(
+        "{}/api/localsend/v2/upload?sessionId={session_id}&fileId=f0&token={token}",
+        target.base_url()
+    );
+    {
+        let mut p = state.sending.lock().await;
+        *p = crate::state::SendProgress {
+            active: true,
+            target_alias: target.alias.clone(),
+            file_name: name.clone(),
+            sent: 0,
+            total: size,
+            started_at: now_ms(),
+        };
+    }
+    let base_bytes = state.relay_bytes.load(Ordering::Relaxed);
+    let tick_state = state.clone();
+    let ticker = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let mut p = tick_state.sending.lock().await;
+            if !p.active {
+                break;
+            }
+            p.sent = tick_state
+                .relay_bytes
+                .load(Ordering::Relaxed)
+                .saturating_sub(base_bytes);
+        }
+    });
+
+    let counter_state = state.clone();
+    let stream = req
+        .into_body()
+        .into_data_stream()
+        .map(move |chunk| {
+            if let Ok(ref b) = chunk {
+                counter_state
+                    .relay_bytes
+                    .fetch_add(b.len() as u64, Ordering::Relaxed);
+            }
+            chunk
+        });
+    let result = client
+        .post(&upload_url)
+        .header("Content-Type", &mime)
+        .body(reqwest::Body::wrap_stream(stream))
+        .send()
+        .await;
+    ticker.abort();
+    *state.sending.lock().await = Default::default();
+
+    match result {
+        Ok(r) if r.status().is_success() => {
+            state.log_event(format!("已送达「{}」：{}", target.alias, name)).await;
+            Json(json!({"ok": true})).into_response()
+        }
+        Ok(r) => {
+            let msg = format!("对方返回 {}", r.status());
+            state.log_event(format!("发送 {} 失败：{msg}", name)).await;
+            err_json(StatusCode::BAD_GATEWAY, &msg)
+        }
+        Err(e) => {
+            state.log_event(format!("发送 {} 失败: {e}", name)).await;
+            err_json(StatusCode::BAD_GATEWAY, &format!("上传失败: {e}"))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct UiSendText {
+    target: String,
+    text: String,
+}
+
+async fn ui_send_text(State(state): State<Shared>, axum::Json(body): axum::Json<UiSendText>) -> Response {
+    let Some(target) = state.devices.lock().await.get(&body.target).cloned() else {
+        return err_json(StatusCode::NOT_FOUND, "目标设备不存在");
+    };
+    let item = crate::client::item_from_text(body.text.clone());
+    match crate::client::send(&state, &http_client(), &target, vec![item]).await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => err_json(StatusCode::BAD_GATEWAY, &format!("{e:#}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct UiAdd {
+    ip: String,
+    #[serde(default = "default_port")]
+    port: u16,
+}
+
+/// 手动添加设备：GET 对方 /info 拿指纹与别名
+async fn ui_add(State(state): State<Shared>, axum::Json(body): axum::Json<UiAdd>) -> Response {
+    let url = format!("https://{}:{}/api/localsend/v2/info", body.ip, body.port);
+    match http_client().get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
+        Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+            Ok(v) => {
+                let fingerprint = v
+                    .get("fingerprint")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if fingerprint.is_empty() {
+                    return err_json(StatusCode::BAD_GATEWAY, "对方未返回指纹");
+                }
+                let device = Device {
+                    fingerprint: fingerprint.clone(),
+                    alias: v.get("alias").and_then(|x| x.as_str()).unwrap_or("未知").to_string(),
+                    ip: body.ip.parse().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+                    port: body.port,
+                    https: true,
+                    device_model: v.get("deviceModel").and_then(|x| x.as_str()).map(str::to_string),
+                    device_type: v.get("deviceType").and_then(|x| x.as_str()).map(str::to_string),
+                    version: v.get("version").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
+                    download: v.get("download").and_then(|x| x.as_bool()).unwrap_or(false),
+                    last_seen: now_ms(),
+                };
+                let alias = device.alias.clone();
+                state.devices.lock().await.insert(fingerprint, device);
+                state.log_event(format!("手动添加设备「{alias}」")).await;
+                Json(json!({"ok": true, "alias": alias})).into_response()
+            }
+            Err(_) => err_json(StatusCode::BAD_GATEWAY, "对方 info 响应异常"),
+        },
+        Ok(r) => err_json(StatusCode::BAD_GATEWAY, &format!("对方返回 {}", r.status())),
+        Err(e) => err_json(StatusCode::BAD_GATEWAY, &format!("连不上 {url}: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct UiReveal {
+    file: String,
+}
+
+async fn ui_reveal(State(state): State<Shared>, axum::Json(body): axum::Json<UiReveal>) -> Response {
+    let dir = state.identity.download_dir.canonicalize().unwrap_or(state.identity.download_dir.clone());
+    let path = dir.join(&body.file);
+    // 必须真实存在才能 canonicalize 成功；解析失败（含 .. 穿越、不存在）一律拒绝，
+    // 之后 starts_with 在两条已解析路径上比较，不可被词法绕过
+    let Ok(canon) = path.canonicalize() else {
+        return err_json(StatusCode::FORBIDDEN, "路径越界");
+    };
+    if !canon.starts_with(&dir) {
+        return err_json(StatusCode::FORBIDDEN, "路径越界");
+    }
+    #[cfg(target_os = "macos")]
+    let ok = std::process::Command::new("open").arg("-R").arg(&canon).spawn().is_ok();
+    #[cfg(target_os = "windows")]
+    let ok = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", canon.display()))
+        .spawn()
+        .is_ok();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let ok = std::process::Command::new("xdg-open")
+        .arg(canon.parent().unwrap_or(&canon))
+        .spawn()
+        .is_ok();
+    #[cfg(not(any(unix, target_os = "windows")))]
+    let ok = false;
+    if ok {
+        Json(json!({"ok": true})).into_response()
+    } else {
+        err_json(StatusCode::INTERNAL_SERVER_ERROR, "无法打开文件位置")
+    }
+}
+
+/// 面板/客户端共用的 reqwest：忽略自签证书、不走代理（纯内网）
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .use_rustls_tls()
+        .no_proxy()
+        .build()
+        .expect("reqwest client")
+}
+
+/// 供 main 使用的共享构造
+pub fn new_state(identity: crate::config::Identity) -> Shared {
+    Arc::new(crate::state::AppState {
+        identity,
+        devices: Default::default(),
+        session: Default::default(),
+        received: Default::default(),
+        events: Default::default(),
+        sending: Default::default(),
+        relay_bytes: Default::default(),
+        rx_bytes: Default::default(),
+        rx_total: Default::default(),
+        rx_name: Default::default(),
+    })
+}

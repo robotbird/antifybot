@@ -175,4 +175,95 @@ open  mac/AntifyBot.app
 
 ---
 
+## 🐜🐜 Rust 版：LocalSend v2 协议节点 + Tauri 桌面应用（`rust/`）
+
+Rust 重写版，**与 [LocalSend](https://localsend.org) 官方 App 直接互通**：手机上装 LocalSend，
+电脑上跑 AntifyBot-Rust，互相就能看见、互发文件。协议实现遵循
+[localsend/protocol](https://github.com/localsend/protocol) v2（多播发现 + HTTPS 收发 + 自签证书指纹）。
+
+### 两种用法
+
+**1. Tauri 桌面应用（推荐）**
+
+```bash
+cd rust
+cargo build --workspace --release
+bash build-app.sh          # 产出 rust/AntifyBot.app（debug 可直接 cargo run -p antify-gui）
+open AntifyBot.app
+```
+
+窗口即控制台：设备卡片、发文本/发文件、接收进度、事件日志一屏全览。
+数据面板由节点本机 `127.0.0.1:53318`（明文 HTTP，仅本机）提供，LocalSend 协议走标准 `53317` HTTPS。
+
+**2. 无头 CLI 节点**
+
+```bash
+cargo build --release
+./target/release/antify-rs serve                      # 常驻节点 + 面板 https://127.0.0.1:53317
+./target/release/antify-rs discover                   # 扫描当前网段的 LocalSend 设备
+./target/release/antify-rs send photo.jpg --to 手机    # 按别名/指纹发文件（自动等待发现）
+./target/release/antify-rs send --text "hi" --host 192.168.1.5:53317   # 直连发送
+```
+
+`serve` 常用参数：`--port` / `--alias` / `--dir <下载目录>` / `--no-multicast` / `--ui-port <本机面板>`。
+
+### Windows
+
+**开箱即用**：`rust/dist-windows/` 里有现成的 x86-64 可执行文件（从 macOS 交叉编译产出）——
+
+- `antify-gui.exe`：双击打开桌面窗口（Tauri + WebView2，Win11 自带运行时）
+- `antify-rs.exe`：命令行节点，`.\antify-rs.exe serve` / `discover` / `send`
+
+自行构建（装好 Rust MSVC 工具链后）：
+
+```powershell
+cd rust
+powershell -ExecutionPolicy Bypass -File build-win.ps1
+```
+
+跨平台要点：TLS 全线用 ring 后端（无 OpenSSL / CMake 依赖）；Windows 无 `SO_REUSEPORT`，由 `SO_REUSEADDR` 覆盖同机共存语义；HTTPS 端口被官方 LocalSend 占用时自动顺延（公告携带真实端口）；「显示文件」用资源管理器定位。首次运行防火墙弹窗请点「允许」。
+
+### 协议实现要点（对照 LocalSend v2）
+
+| 环节 | 实现 |
+| --- | --- |
+| 发现 | UDP 多播 `224.0.0.167:53317`，启动 100/500/2000ms 三连公告 + 每 120s 续期；听到陌生公告即回 `POST /register` 并**回敬一次公告**（3s 限流），双向发现 ~1s 完成 |
+| 身份 | 首次生成自签证书存 `~/.antifybot-rs/`，指纹 = 证书 DER 的 SHA‑256（大写 hex），跨重启稳定 |
+| 接收 | `POST /prepare-upload`（自动接受，单会话，忙时 409）→ `POST /upload?sessionId&fileId&token`（流式落盘 `.part` 后改名，SHA‑256 校验失败 422 可重试 ≤3 次）→ `POST /cancel` |
+| 发送 | 同一套端点反向使用；文件流式上传（ReaderStream），边读边转发不占内存 |
+| 健壮性 | 发送方崩溃留下的会话 60s 无活动自动回收；同名文件自动 `名 (n).ext` 改名不覆盖 |
+
+### 端到端测试
+
+```bash
+# 需先启动节点（GUI 或 antify-rs serve）
+python3 tests/fake_localsend_test.py
+```
+
+内置一个 Python 伪装 LocalSend 设备（自签 HTTPS + 多播公告 + 完整 v2 端点），16 项断言覆盖：
+双向多播发现 / register 礼仪、发文本（面板→协议全链路）、收 3MB 文件（含 SHA‑256 校验落盘）、
+403 错 token、422 错摘要、409 会话占用、cancel 释放、同名改名。
+
+### 结构
+
+```
+rust/
+├── src/            antify-rs 节点库 + CLI（lib.rs 为库入口，main.rs 为 CLI）
+│   ├── config.rs   身份/证书/指纹持久化（~/.antifybot-rs/）
+│   ├── discovery.rs UDP 多播发现 + register 回礼 + 回敬公告
+│   ├── server.rs   axum：LocalSend v2 端点（/info /register /prepare-upload /upload /cancel）+ 面板 API
+│   ├── client.rs   发送端（prepare-upload → 流式 upload，断点计数）
+│   ├── state.rs    共享状态：设备表 / 会话 / 进度 / 事件流
+│   └── ui.rs       面板单页（暖纸蚁巢主题，零外部依赖）
+├── gui/            Tauri v2 桌面壳（窗口加载本机面板，后台跑节点）
+├── dist-windows/   Windows x86-64 可执行文件（antify-gui.exe / antify-rs.exe）
+├── build-app.sh    macOS 打包脚本 → AntifyBot.app
+├── build-win.ps1   Windows 构建脚本
+└── tests/          伪设备端到端测试
+```
+
+技术栈：tokio · axum 0.8 · axum-server(rustls) · reqwest · rcgen · clap 4 · Tauri 2。
+
+---
+
 🐜 *蚂蚁不问来路，进窝就是一家人。*

@@ -6,3 +6,8 @@ files/
 # mac 应用构建产物（bash mac/build.sh 可再生）
 mac/build/
 mac/AntifyBot.app
+
+# Rust 构建产物（cargo build / build-app.sh 可再生）
+rust/target/
+rust/AntifyBot.app
+rust/gui/gen/
