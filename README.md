@@ -227,7 +227,7 @@ powershell -ExecutionPolicy Bypass -File build-win.ps1
 
 | 环节 | 实现 |
 | --- | --- |
-| 发现 | UDP 多播 `224.0.0.167:53317`，启动 100/500/2000ms 三连公告 + 每 120s 续期；听到陌生公告即回 `POST /register` 并**回敬一次公告**（3s 限流），双向发现 ~1s 完成 |
+| 发现 | UDP 多播 `224.0.0.167:53317`，启动 100/500/2000ms 三连公告 + 每 120s 续期；听到陌生公告即回 `POST /register` 并**回敬一次公告**（3s 限流），双向发现 ~1s 完成；**多播按接口收发**（物理网卡 + 虚拟机网桥都入组），UTM/Parallels/VMware 共享网络（NAT）里的虚拟机与宿主机也能互相发现 |
 | 身份 | 首次生成自签证书存 `~/.antifybot-rs/`，指纹 = 证书 DER 的 SHA‑256（大写 hex），跨重启稳定 |
 | 接收 | `POST /prepare-upload`（自动接受，单会话，忙时 409）→ `POST /upload?sessionId&fileId&token`（流式落盘 `.part` 后改名，SHA‑256 校验失败 422 可重试 ≤3 次）→ `POST /cancel` |
 | 发送 | 同一套端点反向使用；文件流式上传（ReaderStream），边读边转发不占内存 |

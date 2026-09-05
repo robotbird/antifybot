@@ -37,6 +37,8 @@ hex = "0.4"
 base64 = "0.22"
 # 跨平台 socket 选项（REUSEADDR/REUSEPORT、多播）：替代 Unix 专属的 libc 调用，Windows 可编译
 socket2 = "0.6"
+# 枚举本机网络接口（多播按接口收发，覆盖虚拟机网桥）
+if-addrs = "0.13"
 
 [profile.release]
 strip = true

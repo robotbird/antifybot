@@ -36,19 +36,33 @@ fn default_protocol() -> String {
 /// 启动发现循环（含公告）。`multicast_port` 独立于 HTTP 端口，默认 53317。
 pub async fn start(state: Shared, client: reqwest::Client, multicast_port: Option<u16>) -> Result<()> {
     let mport = multicast_port.unwrap_or(DEFAULT_PORT);
+    let group: std::net::SocketAddr = (MULTICAST_GROUP, mport).into();
+
+    // 多播走遍所有网段：NAT 内的虚拟机网桥（bridge100 / vmnet8 / 10.211.55.x）
+    // 与物理网卡互不可达（多播 TTL=1 不穿 NAT），但都直连本机 —— 每个接口各自收发即可互通
+    let ifaces = mcast_interfaces();
+    let mut send_socks: Vec<std::sync::Arc<tokio::net::UdpSocket>> = Vec::new();
+    for ip in &ifaces {
+        if let Ok(t) = tokio::net::UdpSocket::from_std(send_socket(Some(*ip))) {
+            send_socks.push(std::sync::Arc::new(t));
+        }
+    }
+    if send_socks.is_empty() {
+        // 兜底：交给系统默认接口
+        send_socks.push(std::sync::Arc::new(tokio::net::UdpSocket::from_std(send_socket(None))?));
+    }
+
     // 端口被独占（如 Windows 上官方 App 未设复用）时退化为「只公告不监听」：
     // 公告仍发往 224.0.0.167:mport，对端经 register（TCP，走公告载荷里的端口）回礼
-    let std_sock = match bind_socket(mport) {
-        Ok(s) => s,
+    let recv = match bind_socket(mport, &ifaces) {
+        Ok(s) => Some(std::sync::Arc::new(tokio::net::UdpSocket::from_std(s)?)),
         Err(e) => {
             state
                 .log_event(format!("UDP {mport} 被占用（{e}），退化为只公告、不监听多播"))
                 .await;
-            bind_socket(0)?
+            None
         }
     };
-    let sock = std::sync::Arc::new(tokio::net::UdpSocket::from_std(std_sock)?);
-    let group: std::net::SocketAddr = (MULTICAST_GROUP, mport).into();
 
     let my_fp = state.identity.fingerprint.clone();
     // 收到陌生公告时的"回敬公告"限流：避免多设备同时在线时风暴
@@ -57,19 +71,23 @@ pub async fn start(state: Shared, client: reqwest::Client, multicast_port: Optio
     // 公告爆发 + 周期重发
     tokio::spawn({
         let state = state.clone();
-        let sock = sock.clone();
+        let socks = send_socks.clone();
         async move {
             loop {
                 for delay in [100u64, 500, 2000] {
                     tokio::time::sleep(Duration::from_millis(delay)).await;
-                    announce_once(&state, &sock, &group).await;
+                    announce_once(&state, &socks, group).await;
                 }
                 tokio::time::sleep(Duration::from_secs(120)).await;
             }
         }
     });
 
-    // 接收循环
+    // 接收循环（降级模式下挂起，只靠上面的公告任务）
+    let Some(sock) = recv else {
+        std::future::pending::<()>().await;
+        return Ok(());
+    };
     let mut buf = vec![0u8; 65536];
     loop {
         let (n, src) = match sock.recv_from(&mut buf).await {
@@ -127,20 +145,21 @@ pub async fn start(state: Shared, client: reqwest::Client, multicast_port: Optio
                 .is_ok()
         {
             let st = state.clone();
-            let sock2 = sock.clone();
-            let g = group;
+            let socks2 = send_socks.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(150)).await;
-                announce_once(&st, &sock2, &g).await;
+                announce_once(&st, &socks2, group).await;
             });
         }
     }
 }
 
-async fn announce_once(state: &Shared, sock: &tokio::net::UdpSocket, group: &std::net::SocketAddr) {
+async fn announce_once(state: &Shared, socks: &[std::sync::Arc<tokio::net::UdpSocket>], group: std::net::SocketAddr) {
     let payload = state.identity.announce_json(true).to_string();
-    if let Err(e) = sock.send_to(payload.as_bytes(), group).await {
-        eprintln!("[发现] 公告发送失败: {e}");
+    for sock in socks {
+        if let Err(e) = sock.send_to(payload.as_bytes(), group).await {
+            eprintln!("[发现] 公告发送失败（{}）: {e}", sock.local_addr().map(|a| a.to_string()).unwrap_or_default());
+        }
     }
 }
 
@@ -192,9 +211,33 @@ async fn register_back(state: Shared, client: reqwest::Client, device: Device) {
     }
 }
 
-/// 绑定 UDP 多播 socket（socket2 跨平台；复用选项必须在 bind 之前设置才生效）。
+/// 枚举适合多播的本地 IPv4 接口（跳过回环与 utun/tun/tap 隧道）。
+/// 返回空 = 交给系统默认接口。
+fn mcast_interfaces() -> Vec<Ipv4Addr> {
+    let mut out: Vec<Ipv4Addr> = Vec::new();
+    if let Ok(list) = if_addrs::get_if_addrs() {
+        for itf in list {
+            let name = itf.name.to_lowercase();
+            if name.starts_with("utun") || name.starts_with("tun") || name.starts_with("tap") {
+                continue; // VPN/代理 TUN 隧道：多播进去只会被吞
+            }
+            if let std::net::IpAddr::V4(ip) = itf.ip() {
+                if ip.is_loopback() || ip.is_link_local() {
+                    continue;
+                }
+                if !out.contains(&ip) {
+                    out.push(ip);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 绑定 UDP 多播接收 socket（socket2 跨平台；复用选项必须在 bind 之前设置才生效）。
+/// 在每个接口上分别入组：来自任一网段（含虚拟机网桥）的公告都能收到。
 /// Windows 没有 SO_REUSEPORT，由 SO_REUSEADDR 覆盖同样语义（双方都设即可共存）。
-fn bind_socket(port: u16) -> Result<std::net::UdpSocket> {
+fn bind_socket(port: u16, ifaces: &[Ipv4Addr]) -> Result<std::net::UdpSocket> {
     use socket2::{Domain, Protocol, Socket, Type};
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_reuse_address(true)?;
@@ -202,9 +245,31 @@ fn bind_socket(port: u16) -> Result<std::net::UdpSocket> {
     sock.set_reuse_port(true)?;
     let addr: std::net::SocketAddr = ([0, 0, 0, 0], port).into();
     sock.bind(&addr.into())?;
-    sock.join_multicast_v4(&MULTICAST_GROUP, &Ipv4Addr::UNSPECIFIED)?;
+    let mut joined = 0;
+    for ip in ifaces {
+        if sock.join_multicast_v4(&MULTICAST_GROUP, ip).is_ok() {
+            joined += 1;
+        }
+    }
+    if joined == 0 {
+        sock.join_multicast_v4(&MULTICAST_GROUP, &Ipv4Addr::UNSPECIFIED)?;
+    }
     sock.set_multicast_loop_v4(true)?;
     sock.set_multicast_ttl_v4(1)?; // 不跨路由器
     sock.set_nonblocking(true)?; // tokio 注册要求
     Ok(sock.into())
+}
+
+/// 指定出口接口的公告 socket（不绑定端口，源端口由系统分配；
+/// 接收方回礼走 TCP，用的是公告载荷里的 HTTPS 端口，与 UDP 源端口无关）
+fn send_socket(iface: Option<Ipv4Addr>) -> std::net::UdpSocket {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).expect("创建 UDP socket");
+    if let Some(ip) = iface {
+        let _ = sock.set_multicast_if_v4(&ip);
+    }
+    let _ = sock.set_multicast_loop_v4(true);
+    let _ = sock.set_multicast_ttl_v4(1);
+    let _ = sock.set_nonblocking(true);
+    sock.into()
 }
