@@ -209,7 +209,7 @@ cargo build --release
 
 ### Windows
 
-**开箱即用**：`rust/dist-windows/` 里有现成的 x86-64 可执行文件（从 macOS 交叉编译产出）——
+**开箱即用**：exe 不入库，由 GitHub Actions 构建产出——仓库 **Actions → build** 页面下载 Artifacts（每次推送 `rust/` 都会构建）；打 `v*` tag 则自动发布到 **Releases**——
 
 - `antify-gui.exe`：双击打开桌面窗口（Tauri + WebView2，Win11 自带运行时）
 - `antify-rs.exe`：命令行节点，`.\antify-rs.exe serve` / `discover` / `send`
@@ -256,7 +256,7 @@ rust/
 │   ├── state.rs    共享状态：设备表 / 会话 / 进度 / 事件流
 │   └── ui.rs       面板单页（暖纸蚁巢主题，零外部依赖）
 ├── gui/            Tauri v2 桌面壳（窗口加载本机面板，后台跑节点）
-├── dist-windows/   Windows x86-64 可执行文件（antify-gui.exe / antify-rs.exe）
+├── dist-windows/   Windows 分发说明（exe 由 GitHub Actions 构建发布，不入库）
 ├── build-app.sh    macOS 打包脚本 → AntifyBot.app
 ├── build-win.ps1   Windows 构建脚本
 └── tests/          伪设备端到端测试

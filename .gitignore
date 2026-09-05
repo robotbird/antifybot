@@ -11,3 +11,7 @@ mac/AntifyBot.app
 rust/target/
 rust/AntifyBot.app
 rust/gui/gen/
+
+# Windows 二进制不入库：由 GitHub Actions 构建发布（.github/workflows/build.yml）
+rust/dist-windows/*
+!rust/dist-windows/README.md

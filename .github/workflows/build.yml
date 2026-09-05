@@ -1,0 +1,93 @@
+# AntifyBot 构建发布：二进制不入库，全部由 CI 产出
+# - 推送 rust/** 变更 → 构建 Windows exe + macOS .app，上传 Artifacts
+# - 推送 v* tag      → 同上并发布到 Releases
+# - Actions 页面可手动触发（workflow_dispatch）
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths: ['rust/**', '.github/workflows/build.yml']
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: 构建（release）
+        run: cargo build --release
+
+      - name: 打包
+        shell: pwsh
+        run: |
+          $out = "pkg"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item dist-windows/README.md $out
+          Copy-Item target/release/antify-gui.exe $out
+          Copy-Item target/release/antify-rs.exe $out
+          # WebView2Loader.dll 视依赖版本可能存在，有则一并带上
+          Get-ChildItem target/release -Filter WebView2Loader.dll -ErrorAction SilentlyContinue |
+            Copy-Item -Destination $out
+          Compress-Archive -Path "$out/*" -DestinationPath AntifyBot-Windows-x64.zip
+          Get-Item AntifyBot-Windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AntifyBot-Windows-x64
+          path: rust/AntifyBot-Windows-x64.zip
+          if-no-files-found: error
+
+  macos:
+    name: macOS arm64
+    runs-on: macos-latest   # Apple Silicon；脚本产出 AntifyBot.app（ad-hoc 签名）
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: 打包 AntifyBot.app
+        run: bash rust/build-app.sh
+
+      - name: 压缩
+        run: cd rust && ditto -c -k --keepParent AntifyBot.app AntifyBot-macOS-arm64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AntifyBot-macOS-arm64
+          path: rust/AntifyBot-macOS-arm64.zip
+          if-no-files-found: error
+
+  release:
+    name: 发布 Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true

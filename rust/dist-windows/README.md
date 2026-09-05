@@ -1,6 +1,9 @@
 # 🐜 AntifyBot Windows 版
 
-本目录是 Windows x86-64 可执行文件（从 macOS 交叉编译产出，已在依赖层面验证编译/链接通过）。
+Windows x86-64 可执行文件**不入库**，由 GitHub Actions 构建（`.github/workflows/build.yml`）：
+
+- **Artifacts**：仓库 Actions → build 工作流，每次构建均可下载（登录 GitHub 后可见）
+- **Releases**：推送 `v*` tag 自动构建并发布
 
 ## 两个文件
 
@@ -26,4 +29,4 @@
 - 与官方 LocalSend App 同机运行时：HTTPS 端口 53317 被占会自动顺延（面板与公告会显示/携带真实端口），多播监听退化为只公告。
 - 未签名 exe：SmartScreen 可能提示「更多信息 → 仍要运行」。
 - 接收目录默认 `下载\AntifyBot`；配置与证书在 `%USERPROFILE%\.antifybot-rs\`。
-- 自行构建：装 Rust（MSVC 工具链）后在 `rust/` 目录 `cargo build --release`，或用 `build-win.ps1`。
+- 自行构建：装 Rust（MSVC 工具链）后在 `rust/` 目录 `cargo build --release`，或用 `build-win.ps1`；CI 与本地构建产物一致，`target/release/` 下的 exe 直接可用。
