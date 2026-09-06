@@ -15,9 +15,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
-pub fn build_router(state: Shared) -> Router {
+/// 协议 router：LocalSend v2 端点（官方 App 兼容）。
+/// 绑 0.0.0.0 对局域网开放 —— 绝不能混入面板 API（任意路径发送/移除设备等只许本机调用）。
+pub fn build_protocol_router(state: Shared) -> Router {
     Router::new()
-        // ---- LocalSend v2 协议端点（官方 App 兼容） ----
         .route("/api/localsend/v2/info", get(info))
         .route("/api/localsend/v1/info", get(info))
         .route("/api/localsend/v2/register", post(register))
@@ -25,7 +26,12 @@ pub fn build_router(state: Shared) -> Router {
         .route("/api/localsend/v2/upload", post(upload))
         .route("/api/localsend/v2/cancel", post(cancel))
         .route("/api/localsend/v2/cancel-upload", post(cancel)) // 旧草案别名
-        // ---- 面板 ----
+        .with_state(state)
+}
+
+/// 面板 router：仪表盘页面 + 面板 API（仅绑 127.0.0.1）
+pub fn build_panel_router(state: Shared) -> Router {
+    Router::new()
         .route("/", get(dashboard))
         .route("/api/ui/state", get(ui_state))
         .route("/api/ui/send", post(ui_send))
@@ -36,10 +42,10 @@ pub fn build_router(state: Shared) -> Router {
         .with_state(state)
 }
 
-/// 面板的明文 HTTP 版（仅 127.0.0.1）：给 Tauri WebView 用，避免自签证书弹窗
+/// 面板的明文 HTTP 版（仅 127.0.0.1）：给 Tauri WebView 与 CLI `serve` 用
 pub async fn serve_ui_http(state: Shared, port: u16) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let app = build_router(state).into_make_service_with_connect_info::<SocketAddr>();
+    let app = build_panel_router(state).into_make_service_with_connect_info::<SocketAddr>();
     axum_server::bind(addr)
         .serve(app)
         .await
@@ -72,7 +78,7 @@ pub async fn serve(state: Shared) -> anyhow::Result<()> {
     )
     .await?;
     let addr = SocketAddr::from(([0, 0, 0, 0], state.identity.port));
-    let app = build_router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
+    let app = build_protocol_router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
     // 会话清扫：发送方崩溃/不取消时，60 秒无活动自动回收，避免锁死后续接收
     {
         let st = state.clone();

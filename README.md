@@ -43,13 +43,13 @@ powershell -ExecutionPolicy Bypass -File build-win.ps1
 ### 无头 CLI 节点（两平台通用）
 
 ```bash
-antify-rs serve                      # 常驻节点 + 面板 https://127.0.0.1:53317
+antify-rs serve                      # 常驻节点 + 本机面板 http://127.0.0.1:53318
 antify-rs discover                   # 扫描当前网段的 LocalSend 设备
 antify-rs send photo.jpg --to 手机    # 按别名/指纹发文件（自动等待发现匹配）
 antify-rs send --text "hi" --host 192.168.1.5:53317   # 直连发送
 ```
 
-`serve` 常用参数：`--port` / `--alias` / `--dir <下载目录>` / `--no-multicast` / `--ui-port <本机面板>`。
+`serve` 常用参数：`--port` / `--alias` / `--dir <下载目录>` / `--no-multicast` / `--ui-port <本机面板端口>`（面板仅绑 127.0.0.1；HTTPS 协议端口对局域网只收发文件，不暴露面板 API）。
 
 桌面窗口即控制台：左侧深色栏自动列出附近设备（微信会话列表式，第二行是最近一条消息预览；
 拖文件到设备行即发送），右侧为聊天式会话（参考微信「文件传输助手」）——

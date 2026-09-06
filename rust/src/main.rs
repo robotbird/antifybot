@@ -17,6 +17,9 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// CLI `serve` 的本机面板默认端口（与 Tauri 壳 UI_PORT_BASE 一致）
+const UI_PORT_DEFAULT: u16 = 53318;
+
 #[derive(Subcommand)]
 enum Cmd {
     /// 启动常驻节点：UDP 多播发现 + HTTPS 接收服务 + Web 面板
@@ -36,9 +39,9 @@ enum Cmd {
         /// 多播端口（默认与 HTTPS 端口同为 53317）
         #[arg(long)]
         multicast_port: Option<u16>,
-        /// 本机面板 HTTP 端口（Tauri WebView 用，默认 53318）
-        #[arg(long)]
-        ui_port: Option<u16>,
+        /// 本机面板 HTTP 端口（默认 53318，被占自动顺延；仅绑 127.0.0.1）
+        #[arg(long, default_value_t = UI_PORT_DEFAULT)]
+        ui_port: u16,
     },
     /// 监听多播几秒，列出当前网段里的 LocalSend 设备
     Discover {
@@ -104,32 +107,32 @@ async fn serve(
     dir: Option<PathBuf>,
     multicast: bool,
     multicast_port: Option<u16>,
-    ui_port: Option<u16>,
+    ui_port: u16,
 ) -> anyhow::Result<()> {
     let port = port.unwrap_or(DEFAULT_PORT);
     let state = antify_rs::start_node(port, alias, dir, multicast, multicast_port).await?;
     let me = &state.identity;
 
+    // 本机面板：默认常开（仅绑 127.0.0.1；协议端口 0.0.0.0 上不再伺服面板，避免局域网可调）
+    let ui_port = server::pick_free_port(ui_port);
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = server::serve_ui_http(st, ui_port).await {
+                eprintln!("[面板] HTTP 服务退出: {e:#}");
+            }
+        });
+    }
+
     println!("┌────────────────────────────────────────────");
     println!("│ 🐜 AntifyBot 节点已启动");
     println!("│ 别名     : {}", me.alias);
     println!("│ 指纹     : {}", me.fingerprint);
-    println!("│ 面板     : https://127.0.0.1:{}", me.port);
-    println!("│          （自签证书，浏览器放行后打开）");
+    println!("│ 面板     : http://127.0.0.1:{ui_port}");
+    println!("│          （仅本机可访问；协议端口 {} 只收发文件）", me.port);
     println!("│ 保存目录 : {}", me.download_dir.display());
     println!("│ 多播发现 : {}", if multicast { "开启（224.0.0.167:53317）" } else { "关闭" });
     println!("└────────────────────────────────────────────");
-
-    // 本机明文面板（可选，Tauri WebView / 证书嫌麻烦时用）
-    if let Some(uip) = ui_port {
-        let st = state.clone();
-        tokio::spawn(async move {
-            match server::serve_ui_http(st, uip).await {
-                Ok(()) | Err(_) => {}
-            }
-        });
-        println!("│ 本机面板 : http://127.0.0.1:{uip}");
-    }
 
     // 主线程挂起，直到 Ctrl-C
     tokio::signal::ctrl_c().await?;

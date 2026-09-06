@@ -25,7 +25,7 @@ fn main() {
             // 3) 面板 HTTP 服务（接管上面占住的 listener）
             tauri::async_runtime::spawn(async move {
                 let router =
-                    antify_rs::server::build_router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
+                    antify_rs::server::build_panel_router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
                 if let Err(e) =
                     axum_server::from_tcp(listener).serve(router).await
                 {
