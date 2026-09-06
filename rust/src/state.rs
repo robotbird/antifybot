@@ -48,6 +48,10 @@ pub struct IncomingFile {
     pub file_name: String,
     pub size: u64,
     pub sha256: Option<String>,
+    /// prepare-upload 声明的 MIME
+    pub mime: String,
+    /// v2 FileDto.preview：官方客户端发文字消息时内嵌正文（区别于普通 .txt 文件）
+    pub preview: String,
     pub done: bool,
     pub attempts: u8,
 }
@@ -84,6 +88,15 @@ pub struct SendProgress {
     pub started_at: u64,
 }
 
+/// 出站图片回显条目（会话流 <img> 取用；与聊天记录同生命周期，仅内存）
+pub struct CachedImg {
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
+/// 出站图片缓存总量上限（超出按最旧淘汰）
+const IMG_CACHE_TOTAL: usize = 48 * 1024 * 1024;
+
 /// 会话流里的一条消息（右侧聊天视图的数据源；仅内存，重启即清）
 #[derive(Clone, Serialize)]
 pub struct ChatMsg {
@@ -113,6 +126,9 @@ pub struct AppState {
     pub sending: Mutex<SendProgress>,
     /// 会话流（右侧聊天视图）：每个设备一条线程，按 peer 过滤
     pub chat: Mutex<Vec<ChatMsg>>,
+    /// 出站图片回显缓存（chat 消息 id → 图）：出站文件不落盘，图片留内存供面板预览；
+    /// 接收图片在下载目录里，直接读盘不进缓存
+    pub img_cache: Mutex<std::collections::BTreeMap<u64, CachedImg>>,
     /// 会话消息自增序号
     pub chat_seq: AtomicU64,
     /// 面板中转发送的实时字节计数（SendProgress 里的是快照，此处原子累加）
@@ -143,14 +159,28 @@ impl AppState {
         }
     }
 
-    /// 会话流追加一条（内存环形，仅保留最近 500 条）
-    pub async fn push_chat(&self, mut m: ChatMsg) {
+    /// 会话流追加一条（内存环形，仅保留最近 500 条）；返回消息 id（出站图片回显缓存以此为主键）
+    pub async fn push_chat(&self, mut m: ChatMsg) -> u64 {
         m.id = self.chat_seq.fetch_add(1, Ordering::Relaxed);
+        let id = m.id;
         let mut c = self.chat.lock().await;
         c.push(m);
         let overflow = c.len().saturating_sub(500);
         if overflow > 0 {
             c.drain(..overflow);
+        }
+        id
+    }
+
+    /// 出站图片入缓存；总量超限按最旧（id 最小）淘汰
+    pub async fn cache_image(&self, id: u64, mime: String, bytes: Vec<u8>) {
+        let mut c = self.img_cache.lock().await;
+        let mut total: usize = c.values().map(|i| i.bytes.len()).sum();
+        total = total.saturating_add(bytes.len());
+        c.insert(id, CachedImg { mime, bytes });
+        while total > IMG_CACHE_TOTAL {
+            let Some((_, old)) = c.pop_first() else { break };
+            total = total.saturating_sub(old.bytes.len());
         }
     }
 

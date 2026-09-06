@@ -1,8 +1,12 @@
 //! 面板页面（内嵌 HTML，无外部依赖，离线可用）
 //! 左右分栏：深色侧栏（品牌 + 设备列表 + 拖放提示），暖白主区。
-//! 设备上线 → 左侧列表；无设备 → 两侧同时提示「等待设备上线」；
-//! 点选设备 → 会话视图：文本/文件按气泡呈现（收到的文件带「显示」），
-//! 活动传输为会话流内吸顶进度卡，最下面是聊天输入条（📎 选文件 / Enter 发文本）。
+//! 设备上线 → 左侧列表（微信会话列表式：第二行显示最近一条消息预览）；
+//! 无设备 → 两侧同时提示「等待设备上线」；
+//! 点选设备 → 会话视图（参考微信「文件传输助手」）：文字为彩色气泡、图片直接显示
+//! 缩略图（点击全屏查看，加载失败退回文件卡片）、文件为中性卡片，
+//! 头像在每条消息最外侧、时间按间隔居中分组；收到的文件带「显示」、文字带「复制」；
+//! 活动传输为会话流内吸顶进度卡，最下面是微信式输入框：一个盒子内上为输入行、
+//! 下为工具行 —— 左下角 文件 / 文件夹 / 剪贴板 三个图标按钮，右侧圆形图标发送。
 //! 指纹/端口等技术细节收进 ⚙ 节点信息，事件以 toast 呈现。
 pub const DASHBOARD: &str = r##"<!doctype html>
 <html lang="zh-CN">
@@ -70,8 +74,6 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .devempty{margin:12px 8px;padding:20px 10px;text-align:center;font-size:12.5px;
     color:var(--side-muted);border:1.5px dashed var(--side-line);border-radius:12px}
   .devempty small{font-size:11px;opacity:.8}
-  .side-foot{padding:12px 16px;border-top:1px solid var(--side-line);
-    font-size:12px;color:var(--side-muted)}
 
   /* ── 主区 ── */
   .main{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0}
@@ -91,41 +93,61 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     width:min(720px,100%);margin:0 auto}
   .chathint{margin:60px auto;text-align:center;color:var(--muted);font-size:13px;line-height:1.9}
   .chathint small{font-size:11.5px;opacity:.85}
-  .msg{display:flex;flex-direction:column;max-width:78%}
-  .msg.out{align-self:flex-end;align-items:flex-end}
-  .msg.in{align-self:flex-start;align-items:flex-start}
-  .bub{padding:9px 14px;border-radius:16px;font-size:14px;line-height:1.5;
+  /* 气泡（微信文件传输助手式）：头像在最外侧、时间居中分组、文件用中性卡片 */
+  .tm{align-self:center;font-size:11px;color:var(--muted);margin:2px 0}
+  .crow{display:flex;gap:10px;align-items:flex-start}
+  .crow.out{flex-direction:row-reverse}
+  .ava{flex:none;width:34px;height:34px;border-radius:9px;background:var(--card);
+    border:1px solid var(--line);display:grid;place-items:center;font-size:17px}
+  .crow.out .ava{background:var(--side);border-color:transparent}
+  .msgcol{min-width:0;max-width:min(76%,540px);display:flex;flex-direction:column;
+    align-items:flex-start}
+  .crow.out .msgcol{align-items:flex-end}
+  .bub{padding:9px 14px;border-radius:14px;font-size:14px;line-height:1.55;
     text-align:left;white-space:pre-wrap;word-break:break-word}
-  .msg.out .bub{background:var(--accent);color:#fff;border-bottom-right-radius:5px}
-  .msg.in .bub{background:var(--card);border:1px solid var(--line);
-    box-shadow:var(--shadow);border-bottom-left-radius:5px}
-  .msg .t{font-size:10.5px;color:var(--muted);margin-top:3px;padding:0 4px}
+  .crow.in .bub{background:var(--card);border:1px solid var(--line);
+    box-shadow:var(--shadow);border-top-left-radius:5px}
+  .crow.out .bub{background:var(--accent);color:#fff;border-top-right-radius:5px}
+  /* 文件消息：无论方向都是中性卡片（选择器带 .crow 抬高优先级，压过出站彩色气泡） */
+  .crow .bub.file{background:var(--card);color:var(--ink);border:1px solid var(--line);
+    box-shadow:var(--shadow);border-radius:14px}
   .fchip{display:flex;align-items:center;gap:9px;min-width:0}
   .fchip .fico{font-size:20px;line-height:1;flex:none}
   .fchip .fmid{min-width:0}
   .fchip .fnm{font-weight:600;font-size:13.5px;max-width:240px;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .fchip .fsz{font-size:11px;opacity:.75;font-family:var(--mono)}
-  .rxb{margin-top:7px;border:none;background:transparent;cursor:pointer;
+  /* 图片消息：直接渲染缩略图（点击全屏查看）；加载失败由 JS 退回文件卡片 */
+  .crow .bub.img{padding:4px}
+  .bub img.chatimg{display:block;max-width:min(320px,72vw);max-height:320px;
+    border-radius:10px;cursor:zoom-in;background:var(--bg)}
+  #lightbox{position:fixed;inset:0;z-index:98;background:rgba(0,0,0,.82);
+    display:grid;place-items:center;cursor:zoom-out;padding:24px}
+  #lightbox[hidden]{display:none}
+  #lightbox img{max-width:92vw;max-height:92vh;border-radius:8px;
+    box-shadow:0 24px 80px rgba(0,0,0,.6)}
+  .rxb{margin-top:6px;border:none;background:transparent;cursor:pointer;
     font-family:var(--sans);font-size:11.5px;color:var(--accent-deep);
     padding:0;font-weight:600}
   .rxb:hover{text-decoration:underline}
-  .msg.out .rxb{color:inherit;opacity:.9}
-  .cfoot{flex:none;display:flex;gap:10px;align-items:center;
-    padding:12px 26px 16px;border-top:1px solid var(--line)}
-  .attach{flex:none;width:36px;height:36px;border-radius:50%;cursor:pointer;
-    border:1px solid var(--line);background:var(--card);color:var(--ink);
-    font-size:15px;line-height:1;display:grid;place-items:center;transition:.15s}
-  .attach:hover{border-color:var(--accent)}
-  #chatinput{flex:1;min-width:0;background:var(--card);border:1px solid var(--line);
-    border-radius:999px;padding:9px 16px;font-size:14px;font-family:var(--sans);
-    color:var(--ink);transition:.15s}
-  #chatinput:focus{outline:none;border-color:var(--accent)}
+  .cfoot{flex:none;padding:12px 26px 16px;border-top:1px solid var(--line)}
+  /* 微信式输入框：盒子内上为输入行、下为工具行（左：文件/文件夹/剪贴板；右：发送） */
+  .composer{display:flex;flex-direction:column;background:var(--card);
+    border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);
+    transition:border-color .15s}
+  .composer:focus-within{border-color:var(--accent)}
+  #chatinput{border:none;background:transparent;outline:none;padding:11px 14px 3px;
+    font-size:14px;font-family:var(--sans);color:var(--ink)}
+  #chatinput::placeholder{color:var(--muted)}
   #chatinput:disabled{opacity:.6}
-  .sendbtn{flex:none;border:none;border-radius:999px;background:var(--accent);
-    color:#fff;font-family:var(--sans);font-weight:600;font-size:13.5px;
-    padding:9px 18px;cursor:pointer;transition:.15s}
-  .sendbtn:hover{background:var(--accent-deep)}
+  .ctools{display:flex;align-items:center;gap:2px;padding:4px 8px 8px}
+  .tool{width:30px;height:30px;border-radius:8px;border:none;background:transparent;
+    color:var(--muted);display:grid;place-items:center;cursor:pointer;transition:.15s}
+  .tool:hover{background:var(--accent-soft);color:var(--accent-deep)}
+  .tool svg{width:17px;height:17px;display:block}
+  .ctools .tsp{flex:1}
+  .tool.send{background:var(--accent);color:#fff;border-radius:50%}
+  .tool.send:hover{background:var(--accent-deep);color:#fff}
 
   /* 等待屏（未选设备） */
   #waitview{flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto}
@@ -236,7 +258,6 @@ pub const DASHBOARD: &str = r##"<!doctype html>
       <div id="devices"></div>
       <div class="devempty" id="devempty">等待设备上线<br><small>同一网络下自动发现</small></div>
     </div>
-    <div class="side-foot">💡 把文件拖到设备上</div>
   </aside>
 
   <main class="main">
@@ -252,9 +273,24 @@ pub const DASHBOARD: &str = r##"<!doctype html>
         <div id="chatlist"></div>
       </div>
       <footer class="cfoot">
-        <button class="attach" id="btn-attach" title="选择文件发送">📎</button>
-        <input id="chatinput" type="text" placeholder="输入消息，Enter 发送…" autocomplete="off">
-        <button class="sendbtn" id="btn-send">发送</button>
+        <div class="composer">
+          <input id="chatinput" type="text" placeholder="输入消息，Enter 发送…" autocomplete="off">
+          <div class="ctools">
+            <button class="tool" id="btn-cfile" title="选择文件发送">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+            </button>
+            <button class="tool" id="btn-cfolder" title="选择文件夹发送（全部文件）">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+            </button>
+            <button class="tool" id="btn-cclip" title="发送剪贴板内容（截图 / 文本）">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>
+            </button>
+            <span class="tsp"></span>
+            <button class="tool send" id="btn-send" title="发送">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+            </button>
+          </div>
+        </div>
       </footer>
     </section>
 
@@ -282,6 +318,7 @@ pub const DASHBOARD: &str = r##"<!doctype html>
 </div>
 
 <input type="file" id="filepick" multiple style="display:none">
+<input type="file" id="folderpick" webkitdirectory multiple style="display:none">
 
 <dialog id="pickdlg">
   <h3>发送给谁？</h3>
@@ -323,6 +360,7 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   </div>
 </dialog>
 
+<div id="lightbox" hidden><img alt=""></div>
 <div id="toasts"></div>
 
 <script>
@@ -336,6 +374,9 @@ const fmtSize = n => { n=+n||0;
   return (n/1073741824).toFixed(2)+' GB'; };
 const fmtAgo = ms => ms<3000?'刚刚':ms<60000?Math.round(ms/1000)+' 秒前':ms<3600000?Math.round(ms/60000)+' 分钟前':Math.round(ms/3600000)+' 小时前';
 const fmtTime = ms => new Date(ms).toLocaleTimeString('zh-CN',{hour12:false});
+// 图片判定（与服务端 /api/ui/asset 的扩展名白名单保持一致）
+const IMG_RE = /\.(png|jpe?g|jfif|gif|webp|bmp|heic|heif|avif)$/i;
+const isImg = n => IMG_RE.test(String(n || ''));
 
 let lastReceivedAt = 0, lastDevJson = '', lastRxJson = '', firstRender = true;
 let sel = null;            // 当前选中的设备指纹（null = 未选，主区显示等待屏）
@@ -354,6 +395,17 @@ function toast(msg, err){
   while (box.children.length > 4) box.firstChild.remove();
 }
 
+// 图片全屏查看：点缩略图放大，点击任意处 / Esc 关闭
+const lb = $('lightbox'), lbimg = lb.querySelector('img');
+function zoomImg(src, name){
+  lbimg.src = src; lbimg.alt = name || '';
+  lb.hidden = false;
+}
+lb.onclick = () => { lb.hidden = true; lbimg.src = ''; };
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !lb.hidden){ lb.hidden = true; lbimg.src = ''; }
+});
+
 function emoji(d){
   const t = d.deviceType || '', m = (d.deviceModel||'') + (d.alias||'');
   if (t === 'mobile' || /iPhone|iPad|手机/i.test(m)) return '📱';
@@ -371,7 +423,11 @@ function render(s){
   window._state = s;
 
   // ── 侧栏设备（内容有变化才重绘，避免打断 hover / 拖放） ──
-  const dj = JSON.stringify(s.devices);
+  // 微信会话列表式：第二行显示与该设备的最近一条消息预览
+  const lastByFp = {};
+  for (const m of (s.chat||[])) lastByFp[m.peer] = m;
+  const dj = JSON.stringify(s.devices) + '|' +
+    s.devices.map(d => (lastByFp[d.fingerprint]||{}).id || 0).join(',');
   if (dj !== lastDevJson){
     lastDevJson = dj;
     const box = $('devices');
@@ -386,7 +442,12 @@ function render(s){
       const mid = document.createElement('div'); mid.className = 'mid';
       const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = d.alias;
       const meta = document.createElement('div'); meta.className = 'meta';
-      meta.textContent = `${d.deviceType || '?'} · ${d.ip}`;
+      const lm = lastByFp[d.fingerprint];
+      meta.textContent = lm
+        ? (lm.kind === 'text'
+            ? lm.text.replace(/\s+/g, ' ').slice(0, 42)
+            : (isImg(lm.name) ? '[图片]' : '📄 ' + lm.name))
+        : `${d.deviceType || '?'} · ${d.ip}`;
       mid.append(nm, meta); row.append(ico, mid);
       row.onclick = () => { sel = (sel === d.fingerprint ? null : d.fingerprint); syncSel(); };
       // 拖文件到设备行 = 发给这台设备
@@ -488,7 +549,16 @@ function renderCenter(s){
   }
 }
 
-// 会话气泡流（按选中设备的指纹过滤；内容无变化不重绘）
+// 时间分组标签（微信式居中显示；跨天带日期）
+function fmtDay(ms){
+  const d = new Date(ms), n = new Date();
+  const hm = d.toLocaleTimeString('zh-CN', {hour12:false, hour:'2-digit', minute:'2-digit'});
+  return d.toDateString() === n.toDateString()
+    ? hm
+    : d.toLocaleDateString('zh-CN', {month:'numeric', day:'numeric'}) + ' ' + hm;
+}
+
+// 会话气泡流（微信式：头像在最外侧、时间居中分组、文件为中性卡片；内容无变化不重绘）
 function renderChat(s){
   const sc = $('cscroll'), box = $('chatlist');
   if (!s || !sel){ lastChatKey = ''; box.innerHTML = ''; return; }
@@ -503,34 +573,71 @@ function renderChat(s){
     const d = (s.devices||[]).find(x => x.fingerprint === sel);
     const hint = document.createElement('div'); hint.className = 'chathint';
     hint.innerHTML = `与「${esc(d ? d.alias : '对方')}」的对话会显示在这里` +
-      '<br><small>拖入文件、点 📎 选文件，或直接输入文字发送</small>';
+      '<br><small>拖入文件，或用左下角按钮选择 文件 / 文件夹 / 剪贴板，也可直接输入文字</small>';
     box.appendChild(hint);
   }
+  const dev = (s.devices||[]).find(x => x.fingerprint === sel);
+  const peerAva = dev ? emoji(dev) : '🖥️';
+  let prevAt = 0;
   for (const m of msgs){
-    const row = document.createElement('div');
-    row.className = 'msg ' + (m.out ? 'out' : 'in');
+    if (!prevAt || m.at - prevAt > 5*60*1000){ // 间隔 > 5 分钟插一条居中时间
+      const tm = document.createElement('div'); tm.className = 'tm';
+      tm.textContent = fmtDay(m.at);
+      box.appendChild(tm);
+    }
+    prevAt = m.at;
+    const crow = document.createElement('div');
+    crow.className = 'crow ' + (m.out ? 'out' : 'in');
+    const ava = document.createElement('div'); ava.className = 'ava';
+    ava.textContent = m.out ? '🐜' : peerAva;
+    const col = document.createElement('div'); col.className = 'msgcol';
     const bub = document.createElement('div'); bub.className = 'bub';
     if (m.kind === 'text'){
       bub.textContent = m.text;
     } else {
-      const chip = document.createElement('div'); chip.className = 'fchip';
-      const fi = document.createElement('span'); fi.className = 'fico'; fi.textContent = '📄';
-      const mid = document.createElement('div'); mid.className = 'fmid';
-      const fn = document.createElement('div'); fn.className = 'fnm';
-      fn.textContent = m.name; fn.title = m.name;
-      const fs = document.createElement('div'); fs.className = 'fsz';
-      fs.textContent = fmtSize(m.size);
-      mid.append(fn, fs); chip.append(fi, mid); bub.appendChild(chip);
-      if (!m.out && m.file){ // 收到的文件可在 Finder / 资源管理器中定位
-        const b = document.createElement('button'); b.className = 'rxb';
-        b.textContent = '显示'; b.onclick = () => reveal(m.file);
-        bub.appendChild(b);
-      }
+      // 中性文件卡片（图片加载失败时的退路）
+      const fillChip = () => {
+        bub.classList.add('file');
+        const chip = document.createElement('div'); chip.className = 'fchip';
+        const fi = document.createElement('span'); fi.className = 'fico'; fi.textContent = '📄';
+        const mid = document.createElement('div'); mid.className = 'fmid';
+        const fn = document.createElement('div'); fn.className = 'fnm';
+        fn.textContent = m.name; fn.title = m.name;
+        const fs = document.createElement('div'); fs.className = 'fsz';
+        fs.textContent = fmtSize(m.size);
+        mid.append(fn, fs); chip.append(fi, mid); bub.appendChild(chip);
+      };
+      if (isImg(m.name)){
+        // 图片直接显示：收到的读下载目录，出站的走内存缓存（已淘汰则退回卡片）
+        bub.classList.add('img');
+        const img = document.createElement('img');
+        img.className = 'chatimg'; img.alt = m.name; img.loading = 'lazy';
+        img.src = m.file
+          ? '/api/ui/asset?file=' + encodeURIComponent(m.file)
+          : '/api/ui/asset?id=' + m.id;
+        img.onerror = () => { img.remove();
+          if (!bub.firstChild){ bub.classList.remove('img'); fillChip(); } };
+        img.onclick = () => zoomImg(img.src, m.name);
+        bub.appendChild(img);
+      } else fillChip();
     }
-    const t = document.createElement('div'); t.className = 't';
-    t.textContent = fmtTime(m.at);
-    row.append(bub, t);
-    box.appendChild(row);
+    col.appendChild(bub);
+    if (m.kind === 'text' && !m.out){ // 文字不落盘，「复制」是取走内容的唯一途径
+      const cp = document.createElement('button'); cp.className = 'rxb';
+      cp.textContent = '复制';
+      cp.onclick = () => { const t = m.text, done = () => toast('已复制');
+        if (navigator.clipboard)
+          navigator.clipboard.writeText(t).then(done).catch(() => fallbackCopy(t, done));
+        else fallbackCopy(t, done); };
+      col.appendChild(cp);
+    }
+    if (m.kind === 'file' && !m.out && m.file){ // 收到的文件可在 Finder / 资源管理器中定位
+      const b = document.createElement('button'); b.className = 'rxb';
+      b.textContent = '显示'; b.onclick = () => reveal(m.file);
+      col.appendChild(b);
+    }
+    crow.append(ava, col);
+    box.appendChild(crow);
   }
   if (nearBottom || switched) sc.scrollTop = sc.scrollHeight;
 }
@@ -642,11 +749,74 @@ $('chatinput').addEventListener('keydown', e => {
   if (e.key === 'Enter'){ e.preventDefault(); sendChatText(); }
 });
 
-// 📎 = 选择文件发给当前会话（未选设备则先解析目标）
-$('btn-attach').onclick = () => {
+// ── 输入框工具行（微信式：左下角 文件/文件夹/剪贴板，右侧发送） ──
+// 文件：选择文件发给当前会话（未选设备则先解析目标）
+$('btn-cfile').onclick = () => {
   if (sel) pickThenFile(sel);
   else resolveTarget(fp => pickThenFile(fp));
 };
+
+// 文件夹：webkitdirectory 一次选中整棵目录，逐个文件发送（接收端按文件名平铺保存）
+let pendingFolderTarget = null;
+function pickThenFolder(fp){ pendingFolderTarget = fp; $('folderpick').value = ''; $('folderpick').click(); }
+$('folderpick').onchange = () => {
+  const files = [...$('folderpick').files]
+    .filter(f => !f.webkitRelativePath.split('/').some(seg => seg.startsWith('.'))); // 滤掉 .DS_Store 等隐藏文件
+  $('folderpick').value = '';
+  if (files.length && pendingFolderTarget){
+    toast(`开始发送 ${files.length} 个文件`);
+    sendFiles(pendingFolderTarget, files);
+  } else if (!files.length) toast('文件夹里没有可发送的文件', true);
+  pendingFolderTarget = null;
+};
+$('btn-cfolder').onclick = () => {
+  if (sel) pickThenFolder(sel);
+  else resolveTarget(fp => pickThenFolder(fp));
+};
+
+// 剪贴板：图片（截图场景）直接作为文件发送，文本填入输入框待编辑；
+// WKWebView 可能拒绝 read()，逐级降级到 readText，再不行提示手动粘贴。
+async function sendClipboard(){
+  const withTarget = send => { if (sel) send(sel); else resolveTarget(send); };
+  try{
+    if (navigator.clipboard && navigator.clipboard.read){
+      const items = await navigator.clipboard.read();
+      for (const it of items){
+        const imgType = it.types.find(t => t.startsWith('image/'));
+        if (imgType){
+          const blob = await it.getType(imgType);
+          const ext = (imgType.split('/')[1] || 'png').replace('+xml', '');
+          const f = new File([blob], `剪贴板图片.${ext}`, {type: imgType});
+          withTarget(fp => sendFiles(fp, [f]));
+          return;
+        }
+      }
+    }
+  }catch(_){ /* 退回 readText */ }
+  try{
+    if (navigator.clipboard && navigator.clipboard.readText){
+      const text = await navigator.clipboard.readText();
+      if (text && text.trim()){
+        const inp = $('chatinput');
+        inp.value += text; inp.focus();
+        return;
+      }
+      toast('剪贴板里没有可发送的内容', true);
+      return;
+    }
+  }catch(_){ /* 无剪贴板读取权限 */ }
+  toast('无法读取剪贴板，可直接 ⌘/Ctrl+V 粘贴', true);
+}
+$('btn-cclip').onclick = sendClipboard;
+
+// 输入框直接粘贴图片（WebView2 / Chromium 支持粘贴截图）＝ 发给当前会话
+$('chatinput').addEventListener('paste', e => {
+  const files = [...((e.clipboardData && e.clipboardData.files) || [])];
+  if (!files.length) return;
+  e.preventDefault();
+  if (sel) sendFiles(sel, files);
+  else resolveTarget(fp => sendFiles(fp, files));
+});
 
 // 发文本（目标以胶囊选择，从选中设备/按钮进入时预选）
 function openText(preselect){

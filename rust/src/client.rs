@@ -37,16 +37,18 @@ pub async fn send(state: &Shared, client: &reqwest::Client, target: &Device, ite
     // 构造 prepare-upload 请求
     let mut files = serde_json::Map::new();
     for (i, item) in items.iter().enumerate() {
-        files.insert(
-            format!("f{i}"),
-            serde_json::json!({
-                "id": format!("f{i}"),
-                "fileName": item.file_name,
-                "size": item.size,
-                "fileType": item.mime,
-                "sha256": item.sha256,
-            }),
-        );
+        let mut f = serde_json::json!({
+            "id": format!("f{i}"),
+            "fileName": item.file_name,
+            "size": item.size,
+            "fileType": item.mime,
+            "sha256": item.sha256,
+        });
+        // 文字消息照官方格式把正文嵌进 preview，接收端据此区分消息与普通 .txt 文件
+        if let Source::Text(bytes) = &item.source {
+            f["preview"] = serde_json::json!(String::from_utf8_lossy(bytes).trim());
+        }
+        files.insert(format!("f{i}"), f);
     }
     let body = serde_json::json!({
         "info": state.identity.register_json(),
@@ -208,8 +210,9 @@ pub async fn item_from_path(path: PathBuf) -> Result<SendItem> {
 }
 
 pub fn item_from_text(text: String) -> SendItem {
+    // 官方客户端的「发送文本」= <uuid>.txt + text/plain + preview 内嵌正文，照此构造
     SendItem {
-        file_name: "text.txt".to_string(),
+        file_name: format!("{}.txt", uuid::Uuid::new_v4()),
         size: text.len() as u64,
         mime: "text/plain".to_string(),
         sha256: None,

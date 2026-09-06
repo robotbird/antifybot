@@ -1,7 +1,7 @@
 //! HTTPS 服务器：LocalSend v2 API（官方 App 可直接发文件给我们）+ 面板 API
 use crate::state::{now_ms, Device, IncomingFile, ReceivedFile, Session, Shared};
 use axum::extract::{ConnectInfo, Query, Request, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -32,6 +32,7 @@ pub fn build_router(state: Shared) -> Router {
         .route("/api/ui/send-text", post(ui_send_text))
         .route("/api/ui/add", post(ui_add))
         .route("/api/ui/reveal", post(ui_reveal))
+        .route("/api/ui/asset", get(ui_asset))
         .with_state(state)
 }
 
@@ -117,6 +118,7 @@ async fn info(State(state): State<Shared>) -> Response {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")] // LocalSend 载荷是 camelCase（deviceModel/deviceType）
 struct RegisterIn {
     #[serde(default)]
     #[allow(dead_code)]
@@ -219,6 +221,16 @@ async fn prepare_upload(
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
                     .map(str::to_string),
+                mime: f
+                    .get("fileType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                preview: f
+                    .get("preview")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 done: false,
                 attempts: 0,
             },
@@ -285,7 +297,7 @@ async fn upload(
     req: Request,
 ) -> Response {
     // 会话与令牌校验
-    let (file_name, size, sha_expect) = {
+    let (file_name, size, sha_expect, mime, preview) = {
         let mut slot = state.session.lock().await;
         let Some(session) = slot.as_mut() else {
             return err_json(StatusCode::FORBIDDEN, "Invalid token or IP address");
@@ -300,7 +312,13 @@ async fn upload(
             return err_json(StatusCode::FORBIDDEN, "Invalid token or IP address");
         }
         file.attempts += 1;
-        (file.file_name.clone(), file.size, file.sha256.clone())
+        (
+            file.file_name.clone(),
+            file.size,
+            file.sha256.clone(),
+            file.mime.clone(),
+            file.preview.clone(),
+        )
     };
     {
         // 会话续命：一次上传（含重试）都算活动
@@ -377,24 +395,45 @@ async fn upload(
         return err_json(StatusCode::UNPROCESSABLE_ENTITY, "Checksum mismatch");
     }
 
-    if tokio::fs::rename(&part_path, &final_path).await.is_err() {
+    // 文字消息识别：官方 LocalSend 的「发送文本」= text/plain 小文件，命名 <uuid>.txt，
+    // 并把正文嵌进 FileDto.preview（消息与文件混发时 preview 缺席，以 uuid.txt 命名兜底）。
+    // 普通文件名的 .md/.txt/.csv… 一律是真文件，照常落盘为文件卡片，
+    // 不能把文档正文当聊天内容渲染。
+    const TEXT_MSG_MAX: u64 = 64 * 1024;
+    let stem = std::path::Path::new(&file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let uuid_named = stem.len() == 36 && uuid::Uuid::parse_str(stem).is_ok();
+    let is_message = mime.eq_ignore_ascii_case("text/plain")
+        && got > 0
+        && got <= TEXT_MSG_MAX
+        && (!preview.is_empty() || uuid_named);
+    let as_text: Option<String> = if is_message {
+        tokio::fs::read(&part_path)
+            .await
+            .ok()
+            .and_then(|b| {
+                let s = String::from_utf8_lossy(&b).trim().to_string();
+                (!s.is_empty()).then_some(s)
+            })
+    } else {
+        None
+    };
+
+    let file_name_final = if as_text.is_some() {
         let _ = tokio::fs::remove_file(&part_path).await;
-        return err_json(StatusCode::INTERNAL_SERVER_ERROR, "落盘失败");
-    }
-    let file_name_final = final_path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| file_name.clone());
-    state
-        .received
-        .lock()
-        .await
-        .push(ReceivedFile {
-            name: file_name_final.clone(),
-            size: got,
-            at: now_ms(),
-            file: file_name_final.clone(),
-        });
+        String::new()
+    } else {
+        if tokio::fs::rename(&part_path, &final_path).await.is_err() {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "落盘失败");
+        }
+        final_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| file_name.clone())
+    };
     // 会话流归因：优先 prepare 时记下的发送方指纹（同机测试/NAT 下 IP 对不上），
     // 缺失再按来源 IP 反查设备表，仍查不到用 IP 字符串占位（气泡不丢）
     let (sender_alias, fp_hint) = {
@@ -417,23 +456,51 @@ async fn upload(
             .map(|d| d.fingerprint.clone())
             .unwrap_or_else(|| peer.ip().to_string())
     };
-    state
-        .push_chat(crate::state::ChatMsg {
-            id: 0,
-            out: false,
-            peer: sender_fp,
-            peer_alias: sender_alias,
-            kind: "file".into(),
-            text: String::new(),
-            name: file_name_final.clone(),
-            size: got,
-            at: now_ms(),
-            file: file_name_final.clone(),
-        })
-        .await;
-    state
-        .log_event(format!("已接收 {}（{} 字节，来自本会话）", file_name_final, got))
-        .await;
+    if let Some(content) = as_text {
+        state
+            .push_chat(crate::state::ChatMsg {
+                id: 0,
+                out: false,
+                peer: sender_fp,
+                peer_alias: sender_alias,
+                kind: "text".into(),
+                text: content,
+                name: String::new(),
+                size: 0,
+                at: now_ms(),
+                file: String::new(),
+            })
+            .await;
+        state.log_event("收到一段文字消息".to_string()).await;
+    } else {
+        state
+            .received
+            .lock()
+            .await
+            .push(ReceivedFile {
+                name: file_name_final.clone(),
+                size: got,
+                at: now_ms(),
+                file: file_name_final.clone(),
+            });
+        state
+            .push_chat(crate::state::ChatMsg {
+                id: 0,
+                out: false,
+                peer: sender_fp,
+                peer_alias: sender_alias,
+                kind: "file".into(),
+                text: String::new(),
+                name: file_name_final.clone(),
+                size: got,
+                at: now_ms(),
+                file: file_name_final.clone(),
+            })
+            .await;
+        state
+            .log_event(format!("已接收 {}（{} 字节，来自本会话）", file_name_final, got))
+            .await;
+    }
 
     // 标记完成；全部完成则会话结束
     let all_done = {
@@ -660,7 +727,15 @@ async fn ui_send(
         }
     });
 
+    // 图片顺带留一份在内存（单张有上限），送达后会话流里可直接回显缩略图
+    const IMG_SPILL_MAX: u64 = 8 * 1024 * 1024;
+    let keep_img = mime.starts_with("image/") && size > 0 && size <= IMG_SPILL_MAX;
+    let spill = Arc::new(std::sync::Mutex::new(Vec::with_capacity(
+        if keep_img { size as usize } else { 0 },
+    )));
+
     let counter_state = state.clone();
+    let spill_buf = spill.clone();
     let stream = req
         .into_body()
         .into_data_stream()
@@ -669,6 +744,11 @@ async fn ui_send(
                 counter_state
                     .relay_bytes
                     .fetch_add(b.len() as u64, Ordering::Relaxed);
+                if keep_img {
+                    if let Ok(mut v) = spill_buf.lock() {
+                        v.extend_from_slice(b);
+                    }
+                }
             }
             chunk
         });
@@ -684,7 +764,7 @@ async fn ui_send(
     match result {
         Ok(r) if r.status().is_success() => {
             state.log_event(format!("已送达「{}」：{}", target.alias, name)).await;
-            state
+            let msg_id = state
                 .push_chat(crate::state::ChatMsg {
                     id: 0,
                     out: true,
@@ -698,6 +778,17 @@ async fn ui_send(
                     file: String::new(),
                 })
                 .await;
+            if keep_img {
+                // 先取走缓冲再 await：MutexGuard 非 Send，不能跨 await 持有
+                let taken = spill
+                    .lock()
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .map(|mut v| std::mem::take(&mut *v));
+                if let Some(bytes) = taken {
+                    state.cache_image(msg_id, mime.clone(), bytes).await;
+                }
+            }
             Json(json!({"ok": true})).into_response()
         }
         Ok(r) => {
@@ -828,6 +919,78 @@ async fn ui_reveal(State(state): State<Shared>, axum::Json(body): axum::Json<UiR
     }
 }
 
+#[derive(Deserialize)]
+struct UiAssetQuery {
+    file: Option<String>,
+    id: Option<u64>,
+}
+
+/// 图片扩展名 → Content-Type（白名单外的扩展名一律不伺服；
+/// svg 可携带脚本，不列入）
+fn img_content_type(name: &str) -> Option<&'static str> {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" | "jfif" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "heic" | "heif" => "image/heic",
+        "avif" => "image/avif",
+        _ => return None,
+    })
+}
+
+/// 会话流图片源：?file= 收到的图（限下载目录内、限图片扩展名）；
+/// ?id= 出站图（内存缓存，淘汰后 404，前端退回文件卡片）。
+/// 同一 URL 内容不变，允许 WebView 缓存，避免气泡重绘反复拉取。
+async fn ui_asset(State(state): State<Shared>, Query(q): Query<UiAssetQuery>) -> Response {
+    if let Some(id) = q.id {
+        let hit = state
+            .img_cache
+            .lock()
+            .await
+            .get(&id)
+            .map(|i| (i.mime.clone(), i.bytes.clone()));
+        if let Some((mime, bytes)) = hit {
+            return (
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
+                ],
+                bytes,
+            )
+                .into_response();
+        }
+        return err_json(StatusCode::NOT_FOUND, "预览已过期");
+    }
+    let Some(name) = q.file else {
+        return err_json(StatusCode::BAD_REQUEST, "缺少 file");
+    };
+    let Some(ct) = img_content_type(&name) else {
+        return err_json(StatusCode::FORBIDDEN, "仅支持图片文件");
+    };
+    let dir = state.identity.download_dir.canonicalize().unwrap_or(state.identity.download_dir.clone());
+    // 与 ui_reveal 同款防线：先解析再前缀比较，挡住 .. 穿越与不存在路径
+    let Ok(canon) = dir.join(&name).canonicalize() else {
+        return err_json(StatusCode::FORBIDDEN, "路径越界");
+    };
+    if !canon.starts_with(&dir) {
+        return err_json(StatusCode::FORBIDDEN, "路径越界");
+    }
+    match tokio::fs::read(&canon).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, ct.to_string()),
+                (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => err_json(StatusCode::NOT_FOUND, "文件不存在"),
+    }
+}
+
 /// 面板/客户端共用的 reqwest：忽略自签证书、不走代理（纯内网）
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -848,6 +1011,7 @@ pub fn new_state(identity: crate::config::Identity) -> Shared {
         events: Default::default(),
         sending: Default::default(),
         chat: Default::default(),
+        img_cache: Default::default(),
         chat_seq: Default::default(),
         relay_bytes: Default::default(),
         rx_bytes: Default::default(),
