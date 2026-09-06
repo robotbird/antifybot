@@ -176,7 +176,7 @@ async fn register(
         state
             .log_event(format!("「{}」注册进来（{}）", device.alias, peer.ip()))
             .await;
-        state.devices.lock().await.insert(reg.fingerprint, device);
+        state.upsert_device(device).await;
     }
     let id = &state.identity;
     Json(json!({
@@ -465,16 +465,13 @@ async fn upload(
     if let Some(content) = as_text {
         state
             .push_chat(crate::state::ChatMsg {
-                id: 0,
                 out: false,
                 peer: sender_fp,
                 peer_alias: sender_alias,
                 kind: "text".into(),
                 text: content,
-                name: String::new(),
-                size: 0,
                 at: now_ms(),
-                file: String::new(),
+                ..Default::default()
             })
             .await;
         state.log_event("收到一段文字消息".to_string()).await;
@@ -491,16 +488,15 @@ async fn upload(
             });
         state
             .push_chat(crate::state::ChatMsg {
-                id: 0,
                 out: false,
                 peer: sender_fp,
                 peer_alias: sender_alias,
                 kind: "file".into(),
-                text: String::new(),
                 name: file_name_final.clone(),
                 size: got,
                 at: now_ms(),
                 file: file_name_final.clone(),
+                ..Default::default()
             })
             .await;
         state
@@ -552,16 +548,23 @@ async fn dashboard() -> Html<&'static str> {
     Html(crate::ui::DASHBOARD)
 }
 
+/// 在线判定：多播周期 120s，300s 未见视为离线（列表仍保留，只是置灰）
+const ONLINE_MS: u64 = 300_000;
+
 async fn ui_state(State(state): State<Shared>) -> Response {
     let id = &state.identity;
     let devices: Vec<serde_json::Value> = {
         let devices = state.devices.lock().await;
         let now = now_ms();
-        let mut list: Vec<&Device> = devices
-            .values()
-            .filter(|d| now.saturating_sub(d.last_seen) < 300_000)
-            .collect();
-        list.sort_by(|a, b| a.alias.cmp(&b.alias));
+        let online = |d: &Device| now.saturating_sub(d.last_seen) < ONLINE_MS;
+        let mut list: Vec<&Device> = devices.values().collect();
+        // 在线组（别名升序）在前，离线组（最近可见在前）在后
+        list.sort_by(|a, b| match (online(a), online(b)) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (true, true) => a.alias.cmp(&b.alias),
+            (false, false) => b.last_seen.cmp(&a.last_seen),
+        });
         list.iter()
             .map(|d| {
                 json!({
@@ -573,6 +576,7 @@ async fn ui_state(State(state): State<Shared>) -> Response {
                     "deviceType": d.device_type.clone().unwrap_or_else(|| "?".into()),
                     "version": d.version,
                     "lastSeenMs": now.saturating_sub(d.last_seen),
+                    "online": online(d),
                 })
             })
             .collect()
@@ -772,16 +776,14 @@ async fn ui_send(
             state.log_event(format!("已送达「{}」：{}", target.alias, name)).await;
             let msg_id = state
                 .push_chat(crate::state::ChatMsg {
-                    id: 0,
                     out: true,
                     peer: target.fingerprint.clone(),
                     peer_alias: target.alias.clone(),
                     kind: "file".into(),
-                    text: String::new(),
                     name: name.clone(),
                     size,
                     at: now_ms(),
-                    file: String::new(),
+                    ..Default::default()
                 })
                 .await;
             if keep_img {
@@ -825,16 +827,13 @@ async fn ui_send_text(State(state): State<Shared>, axum::Json(body): axum::Json<
         Ok(()) => {
             state
                 .push_chat(crate::state::ChatMsg {
-                    id: 0,
                     out: true,
                     peer: target.fingerprint.clone(),
                     peer_alias: target.alias.clone(),
                     kind: "text".into(),
                     text: sent_text,
-                    name: String::new(),
-                    size: 0,
                     at: now_ms(),
-                    file: String::new(),
+                    ..Default::default()
                 })
                 .await;
             Json(json!({"ok": true})).into_response()
@@ -877,7 +876,7 @@ async fn ui_add(State(state): State<Shared>, axum::Json(body): axum::Json<UiAdd>
                     last_seen: now_ms(),
                 };
                 let alias = device.alias.clone();
-                state.devices.lock().await.insert(fingerprint, device);
+                state.upsert_device(device).await;
                 state.log_event(format!("手动添加设备「{alias}」")).await;
                 Json(json!({"ok": true, "alias": alias})).into_response()
             }
@@ -1007,10 +1006,12 @@ pub fn http_client() -> reqwest::Client {
         .expect("reqwest client")
 }
 
-/// 供 main 使用的共享构造
-pub fn new_state(identity: crate::config::Identity) -> Shared {
-    Arc::new(crate::state::AppState {
+/// 供 main 使用的共享构造（打开 SQLite，失败即上层报错退出）
+pub fn new_state(identity: crate::config::Identity) -> anyhow::Result<Shared> {
+    let db = crate::db::Db::open(&identity.cfg_dir.join("chat.db"))?;
+    Ok(Arc::new(crate::state::AppState {
         identity,
+        db,
         devices: Default::default(),
         session: Default::default(),
         received: Default::default(),
@@ -1023,5 +1024,5 @@ pub fn new_state(identity: crate::config::Identity) -> Shared {
         rx_bytes: Default::default(),
         rx_total: Default::default(),
         rx_name: Default::default(),
-    })
+    }))
 }

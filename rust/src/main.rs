@@ -144,7 +144,7 @@ async fn serve(
 async fn discover(secs: u64, alias: Option<String>) -> anyhow::Result<()> {
     // 一次性命令：只读身份，不覆盖常驻节点已保存的别名
     let identity = antify_rs::config::Identity::load_opts(alias, DEFAULT_PORT, None, false)?;
-    let state = server::new_state(identity);
+    let state = server::new_state(identity)?;
     let client = server::http_client();
 
     let st = state.clone();
@@ -188,7 +188,7 @@ async fn send(
         }
         (None, Some(name)) => {
             let identity = antify_rs::config::Identity::load_opts(alias.clone(), port, None, false)?;
-            let state = server::new_state(identity);
+            let state = server::new_state(identity)?;
             let client = server::http_client();
             let st = state.clone();
             let cl = client.clone();
@@ -239,7 +239,7 @@ async fn send(
         anyhow::bail!("没有内容可发：给位置参数传文件，或 --text 传文本");
     }
     let identity = antify_rs::config::Identity::load_opts(alias, port, None, false)?;
-    let state = server::new_state(identity);
+    let state = server::new_state(identity)?;
     client::send(&state, &server::http_client(), &target, items).await
 }
 

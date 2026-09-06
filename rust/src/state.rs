@@ -97,8 +97,8 @@ pub struct CachedImg {
 /// 出站图片缓存总量上限（超出按最旧淘汰）
 const IMG_CACHE_TOTAL: usize = 48 * 1024 * 1024;
 
-/// 会话流里的一条消息（右侧聊天视图的数据源；仅内存，重启即清）
-#[derive(Clone, Serialize)]
+/// 会话流里的一条消息（右侧聊天视图的数据源；SQLite 持久化，重启不丢）
+#[derive(Clone, Serialize, Default)]
 pub struct ChatMsg {
     pub id: u64,
     /// true = 我方发出
@@ -115,10 +115,16 @@ pub struct ChatMsg {
     pub at: u64,
     /// 已收文件名（相对下载目录，可「显示」）；出站为空
     pub file: String,
+    /// 出站专用："sending" | "ok" | "fail"；入站恒空（协议无已读回执）
+    pub status: String,
+    /// 出站文件的源绝对路径（重试时从原路径重读重发）；流式中转/文本为空
+    pub src_path: String,
 }
 
 pub struct AppState {
     pub identity: crate::config::Identity,
+    /// SQLite（消息真源 + 设备写穿副本），见 db.rs
+    pub db: crate::db::Db,
     pub devices: Mutex<HashMap<String, Device>>,
     pub session: Mutex<Option<Session>>,
     pub received: Mutex<Vec<ReceivedFile>>,
@@ -149,6 +155,46 @@ pub fn now_ms() -> u64 {
 }
 
 impl AppState {
+    /// 设备入表 + 写穿 DB（发现 / register / 手动添加统一走这里；
+    /// 新数据整行覆盖旧值——IP/别名变化自然刷新；DB 失败仅记事件不拦内存）
+    pub async fn upsert_device(&self, d: Device) {
+        if let Err(e) = self.db.upsert_device(&d) {
+            self.log_event(format!("设备「{}」入库失败: {e:#}", d.alias)).await;
+        }
+        self.devices
+            .lock()
+            .await
+            .insert(d.fingerprint.clone(), d);
+    }
+
+    /// 移除设备（内存 + DB）；消息表保留——对方再上线时历史会话还在
+    pub async fn remove_device(&self, fp: &str) {
+        let alias = self.devices.lock().await.remove(fp).map(|d| d.alias);
+        if let Err(e) = self.db.remove_device(fp) {
+            self.log_event(format!("移除设备入库失败: {e:#}")).await;
+        }
+        if let Some(a) = alias {
+            self.log_event(format!("已移除设备「{a}」（重新上线会自动出现）")).await;
+        }
+    }
+
+    /// 常驻节点启动恢复：设备表回填内存 → 上次在途的出站消息落 fail → 历史裁剪。
+    /// 一次性命令（discover/send）不调用——避免把常驻节点在途的 sending 误标 fail。
+    pub async fn load_persisted(&self) {
+        let devs = self.db.load_devices();
+        if !devs.is_empty() {
+            let mut map = self.devices.lock().await;
+            for d in devs {
+                map.insert(d.fingerprint.clone(), d);
+            }
+        }
+        let n = self.db.fail_pending_sending();
+        if n > 0 {
+            self.log_event(format!("{n} 条上次未完成的消息已标记未送达（可点击重试）")).await;
+        }
+        self.db.prune();
+    }
+
     pub async fn log_event(&self, text: impl Into<String>) {
         let line = text.into();
         println!("[{}] {}", humantime(now_ms()), line);

@@ -23,6 +23,8 @@ pub struct Identity {
     pub download_dir: PathBuf,
     pub cert_pem: PathBuf,
     pub key_pem: PathBuf,
+    /// 配置目录（~/.antifybot-rs/）：chat.db 也放这里
+    pub cfg_dir: PathBuf,
 }
 
 impl Identity {
@@ -89,6 +91,7 @@ impl Identity {
             download_dir,
             cert_pem,
             key_pem,
+            cfg_dir,
         })
     }
 

@@ -260,11 +260,7 @@ async fn announce_once(state: &Shared, socks: &[Arc<UdpSocket>], group: std::net
 }
 
 async fn upsert(state: Shared, device: Device) {
-    state
-        .devices
-        .lock()
-        .await
-        .insert(device.fingerprint.clone(), device);
+    state.upsert_device(device).await;
 }
 
 /// POST /api/localsend/v2/register —— 响应（若有）刷新对方信息
@@ -275,23 +271,28 @@ async fn register_back(state: Shared, client: reqwest::Client, device: Device) {
     match resp {
         Ok(r) if r.status().is_success() => {
             if let Ok(v) = r.json::<serde_json::Value>().await {
-                let alias = v.get("alias").and_then(|x| x.as_str()).map(str::to_string);
-                let mut devices = state.devices.lock().await;
-                if let Some(d) = devices.get_mut(&device.fingerprint) {
-                    if let Some(a) = alias {
-                        d.alias = a;
-                    }
-                    if let Some(m) = v.get("deviceModel").and_then(|x| x.as_str()) {
-                        d.device_model = Some(m.to_string());
-                    }
-                    if let Some(t) = v.get("deviceType").and_then(|x| x.as_str()) {
-                        d.device_type = Some(t.to_string());
-                    }
-                    if let Some(dl) = v.get("download").and_then(|x| x.as_bool()) {
-                        d.download = dl;
-                    }
-                    d.last_seen = now_ms();
+                // 以内存里的最新条目为底（公告快照可能已落后），覆盖响应带来的新信息
+                let mut d = state
+                    .devices
+                    .lock()
+                    .await
+                    .get(&device.fingerprint)
+                    .cloned()
+                    .unwrap_or(device);
+                if let Some(a) = v.get("alias").and_then(|x| x.as_str()) {
+                    d.alias = a.to_string();
                 }
+                if let Some(m) = v.get("deviceModel").and_then(|x| x.as_str()) {
+                    d.device_model = Some(m.to_string());
+                }
+                if let Some(t) = v.get("deviceType").and_then(|x| x.as_str()) {
+                    d.device_type = Some(t.to_string());
+                }
+                if let Some(dl) = v.get("download").and_then(|x| x.as_bool()) {
+                    d.download = dl;
+                }
+                d.last_seen = now_ms();
+                state.upsert_device(d).await;
             }
         }
         Ok(r) => {
