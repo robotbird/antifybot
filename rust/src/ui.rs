@@ -2,7 +2,8 @@
 //! 左右分栏：ChatGPT 式浅暖灰侧栏（品牌 + 设备列表 + 左下角「设置」入口），
 //! 近白主区；深色模式镜像为暗一档。
 //! 设备上线 → 左侧会话列表式列表（第二行显示最近一条消息预览）；
-//! 点选设备 → 会话视图（参考微信「文件传输助手」）：文字为彩色气泡、图片直接显示
+//! 点选设备 → 会话视图（参考微信「文件传输助手」）：头部横带取侧栏同色
+//! （与侧栏连成 L 形，和消息区分层），文字为彩色气泡、图片直接显示
 //! 缩略图（点击全屏查看，加载失败退回文件卡片）、文件为中性卡片，
 //! 头像在每条消息最外侧、时间按间隔居中分组；收到的文件带「显示」、文字带「复制」；
 //! 活动传输为会话流内吸顶进度卡，最下面是微信式输入框：一个盒子内上为输入行、
@@ -20,7 +21,8 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   /* ── 主题变量：默认浅色；显式深色 data-theme="dark"；系统深色但未锁定浅色时同样取深色 ── */
   :root{
     --bg:#faf9f7; --card:#ffffff; --ink:#1d1d1f; --muted:#86868b;
-    --line:rgba(0,0,0,.08); --accent:#d98324; --accent-deep:#b06a15;
+    --line:rgba(0,0,0,.08); --line-strong:rgba(0,0,0,.13);
+    --accent:#d98324; --accent-deep:#b06a15;
     --accent-soft:rgba(217,131,36,.10); --ok:#34a853; --err:#e5484d;
     /* 侧栏：ChatGPT 式浅暖灰，比主区深半档 */
     --side:#ececea; --side-ink:#1d1d1f; --side-muted:#86868b;
@@ -34,7 +36,8 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   }
   :root[data-theme="dark"]{
     --bg:#1a1a1c; --card:#232327; --ink:#f0f0f2; --muted:#9a9aa0;
-    --line:rgba(255,255,255,.11); --accent:#e8932c; --accent-deep:#f0a64e;
+    --line:rgba(255,255,255,.11); --line-strong:rgba(255,255,255,.16);
+    --accent:#e8932c; --accent-deep:#f0a64e;
     --accent-soft:rgba(232,147,44,.14); --ok:#4cc38a; --err:#ff6b6e;
     --side:#131315; --side-ink:#f0f0f2; --side-muted:#9a9aa0;
     --side-line:rgba(255,255,255,.10); --side-hover:rgba(255,255,255,.05);
@@ -45,7 +48,8 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   @media(prefers-color-scheme:dark){
     :root:not([data-theme="light"]){
       --bg:#1a1a1c; --card:#232327; --ink:#f0f0f2; --muted:#9a9aa0;
-      --line:rgba(255,255,255,.11); --accent:#e8932c; --accent-deep:#f0a64e;
+      --line:rgba(255,255,255,.11); --line-strong:rgba(255,255,255,.16);
+    --accent:#e8932c; --accent-deep:#f0a64e;
       --accent-soft:rgba(232,147,44,.14); --ok:#4cc38a; --err:#ff6b6e;
       --side:#131315; --side-ink:#f0f0f2; --side-muted:#9a9aa0;
       --side-line:rgba(255,255,255,.10); --side-hover:rgba(255,255,255,.05);
@@ -119,8 +123,9 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   /* 会话视图（选中设备后）：头部 + 气泡流 + 底部聊天输入条 */
   #chatview{flex:1;min-height:0;display:flex;flex-direction:column}
   #chatview[hidden]{display:none}
-  .chead{flex:none;padding:13px 26px;border-bottom:1px solid var(--line);
-    display:flex;align-items:baseline;gap:10px}
+  /* 头部横带取侧栏同色，与左侧连成 L 形，和消息区拉开层次 */
+  .chead{flex:none;padding:13px 26px;border-bottom:1px solid var(--line-strong);
+    background:var(--side);display:flex;align-items:baseline;gap:10px}
   .chead h2{margin:0;font-size:16px;font-weight:700;letter-spacing:-.01em;
     max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .chead .cmeta{font-size:12px;color:var(--muted);min-width:0;
