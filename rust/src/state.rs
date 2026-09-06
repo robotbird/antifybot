@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -130,13 +130,9 @@ pub struct AppState {
     pub received: Mutex<Vec<ReceivedFile>>,
     pub events: Mutex<VecDeque<(u64, String)>>,
     pub sending: Mutex<SendProgress>,
-    /// 会话流（右侧聊天视图）：每个设备一条线程，按 peer 过滤
-    pub chat: Mutex<Vec<ChatMsg>>,
     /// 出站图片回显缓存（chat 消息 id → 图）：出站文件不落盘，图片留内存供面板预览；
-    /// 接收图片在下载目录里，直接读盘不进缓存
+    /// 接收图片在下载目录里，直接读盘不进缓存。id 即 DB 消息主键，跨重启稳定
     pub img_cache: Mutex<std::collections::BTreeMap<u64, CachedImg>>,
-    /// 会话消息自增序号
-    pub chat_seq: AtomicU64,
     /// 面板中转发送的实时字节计数（SendProgress 里的是快照，此处原子累加）
     pub relay_bytes: AtomicU64,
     /// 接收侧当前文件进度（upload 处理器实时更新）
@@ -205,17 +201,26 @@ impl AppState {
         }
     }
 
-    /// 会话流追加一条（内存环形，仅保留最近 500 条）；返回消息 id（出站图片回显缓存以此为主键）
-    pub async fn push_chat(&self, mut m: ChatMsg) -> u64 {
-        m.id = self.chat_seq.fetch_add(1, Ordering::Relaxed);
-        let id = m.id;
-        let mut c = self.chat.lock().await;
-        c.push(m);
-        let overflow = c.len().saturating_sub(500);
-        if overflow > 0 {
-            c.drain(..overflow);
+    /// 会话流追加一条（SQLite 持久化，重启不丢）；返回消息 id（出站图片回显缓存以此为主键）。
+    /// DB 写入失败仅记事件并返回 0（set_msg_status(0) 自然 no-op，消息不进面板但流程不断）
+    pub async fn push_chat(&self, m: ChatMsg) -> u64 {
+        match self.db.insert_msg(&m) {
+            Ok(id) => id,
+            Err(e) => {
+                self.log_event(format!("消息入库失败: {e:#}")).await;
+                0
+            }
         }
-        id
+    }
+
+    /// 出站消息状态流转：sending → ok / fail
+    pub async fn set_msg_status(&self, id: u64, status: &str) {
+        if id == 0 {
+            return;
+        }
+        if let Err(e) = self.db.set_msg_status(id, status) {
+            self.log_event(format!("消息 {id} 状态更新失败: {e:#}")).await;
+        }
     }
 
     /// 出站图片入缓存；总量超限按最旧（id 最小）淘汰

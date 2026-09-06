@@ -617,21 +617,18 @@ async fn ui_state(State(state): State<Shared>) -> Response {
         }
     };
     let sending = state.sending.lock().await.clone();
-    let chat: Vec<serde_json::Value> = {
-        let c = state.chat.lock().await;
-        c.iter()
-            .rev()
-            .take(200)
-            .rev()
-            .map(|m| {
-                json!({
-                    "id": m.id, "out": m.out, "peer": m.peer, "alias": m.peer_alias,
-                    "kind": m.kind, "text": m.text, "name": m.name, "size": m.size,
-                    "at": m.at, "file": m.file,
-                })
+    let chat: Vec<serde_json::Value> = state
+        .db
+        .recent_msgs(200)
+        .iter()
+        .map(|m| {
+            json!({
+                "id": m.id, "out": m.out, "peer": m.peer, "alias": m.peer_alias,
+                "kind": m.kind, "text": m.text, "name": m.name, "size": m.size,
+                "at": m.at, "file": m.file, "status": m.status, "srcPath": m.src_path,
             })
-            .collect()
-    };
+        })
+        .collect();
 
     Json(json!({
         "me": {
@@ -1017,9 +1014,7 @@ pub fn new_state(identity: crate::config::Identity) -> anyhow::Result<Shared> {
         received: Default::default(),
         events: Default::default(),
         sending: Default::default(),
-        chat: Default::default(),
         img_cache: Default::default(),
-        chat_seq: Default::default(),
         relay_bytes: Default::default(),
         rx_bytes: Default::default(),
         rx_total: Default::default(),

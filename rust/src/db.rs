@@ -109,7 +109,7 @@ impl Db {
     pub fn fail_pending_sending(&self) -> usize {
         let Ok(c) = self.0.lock() else { return 0 };
         c.execute("UPDATE messages SET status='fail' WHERE out=1 AND status='sending'", [])
-            .unwrap_or(0) as usize
+            .unwrap_or(0)
     }
 
     /// 启动时裁剪历史（只留最近 MSG_KEEP 条）
