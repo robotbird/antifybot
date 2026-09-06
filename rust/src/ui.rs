@@ -600,7 +600,8 @@ function renderChat(s){
   const sc = $('cscroll'), box = $('chatlist');
   if (!s || !sel){ lastChatKey = ''; box.innerHTML = ''; return; }
   const msgs = (s.chat||[]).filter(m => m.peer === sel);
-  const key = sel + ':' + msgs.map(m => m.id).join(',');
+  // 防抖 key 含出站状态：⏳→✓/⚠ 翻转必须重绘
+  const key = sel + ':' + msgs.map(m => m.id + ':' + (m.out ? m.status : '')).join(',');
   const switched = lastChatSel !== sel;
   if (key === lastChatKey && !switched) return;
   lastChatKey = key; lastChatSel = sel;
@@ -672,6 +673,21 @@ function renderChat(s){
       const b = document.createElement('button'); b.className = 'rxb';
       b.textContent = '显示'; b.onclick = () => reveal(m.file);
       col.appendChild(b);
+    }
+    if (m.out){ // 出站消息状态行：⏳ 发送中 / ✓ 已送达 / ⚠ 未送达（文本与带源路径的可重试）
+      const st = document.createElement('div'); st.className = 'st';
+      if (m.status === 'sending') st.textContent = '⏳ 发送中…';
+      else if (m.status === 'ok') st.textContent = '✓ 已送达';
+      else if (m.status === 'fail'){
+        if (m.kind === 'text' || m.srcPath){
+          st.textContent = '⚠ 未送达 ';
+          const rb = document.createElement('button'); rb.className = 'rbtn';
+          rb.textContent = '重试';
+          rb.onclick = () => retryMsg(m);
+          st.appendChild(rb);
+        } else st.textContent = '⚠ 未送达 · 请重新拖入文件';
+      }
+      if (st.textContent) col.appendChild(st); // 入站与旧数据无状态行
     }
     crow.append(ava, col);
     box.appendChild(crow);
@@ -763,7 +779,7 @@ cv.addEventListener('drop', e => { if (!hasFiles(e)) return;
   else resolveTarget(fp => sendFiles(fp, files));
 });
 
-// ── 聊天输入条：Enter 发送（失败回填输入框） ──
+// ── 聊天输入条：Enter 发送（失败已在会话流留 ⚠ 气泡，不回填输入框） ──
 function sendChatText(){
   const inp = $('chatinput');
   const text = inp.value.trim();
@@ -774,11 +790,10 @@ function sendChatText(){
     .then(async r => {
       if (!r.ok){
         const v = await r.json().catch(() => ({}));
-        toast(v.error || '发送失败', true);
-        inp.value = text;
+        toast(v.error || '发送失败（消息已标记未送达）', true);
       }
     })
-    .catch(e => { toast('发送失败:' + e.message, true); inp.value = text; })
+    .catch(e => toast('发送失败:' + e.message, true))
     .finally(() => { inp.disabled = false; inp.focus(); });
 }
 $('btn-send').onclick = sendChatText;
@@ -905,6 +920,17 @@ $('addok').onclick = async () => {
     else toast(v.error || '添加失败', true);
   }catch(e){ toast('添加失败:' + e.message, true); }
 };
+
+// 重试未送达的消息（服务端校验可重试性：文本或有源路径的文件；返回后状态经轮询刷新）
+async function retryMsg(m){
+  try{
+    const r = await fetch('/api/ui/retry', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: m.id})});
+    const v = await r.json().catch(()=>({}));
+    if (r.ok) toast('重试中…');
+    else toast(v.error || '重试失败', true);
+  }catch(e){ toast('重试失败:' + e.message, true); }
+}
 
 // 移除设备：内存 + DB 删行，消息历史保留（对方重新 announce 会自动回来）
 async function removeDevice(d){

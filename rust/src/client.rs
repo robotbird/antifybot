@@ -62,6 +62,7 @@ pub async fn send(state: &Shared, client: &reqwest::Client, target: &Device, ite
     let url = format!("{}/api/localsend/v2/prepare-upload", target.base_url());
     let resp = client
         .post(&url)
+        .timeout(std::time::Duration::from_secs(10)) // 协商阶段不能久等（对端不在线 5s 内见分晓）
         .json(&body)
         .send()
         .await
@@ -127,7 +128,9 @@ pub async fn send(state: &Shared, client: &reqwest::Client, target: &Device, ite
         );
         let req = client.post(&upload_url);
         let resp = match &item.source {
+            // 文本很小，15s 足够；路径文件不加总超时（大文件传输可能很久，连接层超时已兜底）
             Source::Text(data) => req
+                .timeout(std::time::Duration::from_secs(15))
                 .header("Content-Type", &item.mime)
                 .body(data.clone())
                 .send()

@@ -192,8 +192,9 @@ time.sleep(0.3)
 prep = fake["prepared"][-1] if fake["prepared"] else {}
 f0 = prep.get("files", {}).get("f0", {})
 got = fake["uploads"].get("f0", b"")
-check("面板发文本 → 伪设备收到 prepare-upload",
-      ok and f0.get("fileName") == "text.txt" and f0.get("size") == len(sent_text.encode()))
+check("面板发文本 → 伪设备收到 prepare-upload（官方格式 <uuid>.txt + preview 内嵌正文）",
+      ok and len(f0.get("fileName", "")) == 40 and f0.get("fileName", "").endswith(".txt")
+      and f0.get("size") == len(sent_text.encode()) and f0.get("preview") == sent_text)
 check("伪设备收到上传内容一致", got.decode(errors="replace") == sent_text)
 check("prepare-upload.info 带节点指纹与端口", prep.get("info", {}).get("fingerprint") not in ("", None)
       and prep.get("info", {}).get("port") == NODE_HTTPS_PORT)

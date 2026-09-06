@@ -672,26 +672,51 @@ async fn ui_send(
     let size = q.size.unwrap_or(0);
     let mime = q.mime.unwrap_or_else(|| "application/octet-stream".to_string());
 
-    // 1) prepare-upload
+    // 先落一条 sending 消息（会话流立即出现 ⏳ 气泡；失败/成功只改状态，气泡不消失）。
+    // 流式中转拿不到源路径 → src_path 空，失败后无重试按钮（Step 5 说明文案）
+    let msg_id = state
+        .push_chat(crate::state::ChatMsg {
+            out: true,
+            peer: target.fingerprint.clone(),
+            peer_alias: target.alias.clone(),
+            kind: "file".into(),
+            name: name.clone(),
+            size,
+            at: now_ms(),
+            status: "sending".into(),
+            ..Default::default()
+        })
+        .await;
+
+    // 1) prepare-upload（10s 总时限：对端不在线时 ⏳ 约 5~10s 变 ⚠，不再挂几十秒）
     let prepare = json!({
         "info": state.identity.register_json(),
         "files": { "f0": { "id": "f0", "fileName": name, "size": size, "fileType": mime } },
     });
     let resp = match client
         .post(format!("{}/api/localsend/v2/prepare-upload", target.base_url()))
+        .timeout(std::time::Duration::from_secs(10))
         .json(&prepare)
         .send()
         .await
     {
         Ok(r) => r,
-        Err(e) => return err_json(StatusCode::BAD_GATEWAY, &format!("联系「{}」失败: {e}", target.alias)),
+        Err(e) => {
+            state.set_msg_status(msg_id, "fail").await;
+            state.log_event(format!("发送 {name} 失败：联系「{}」失败: {e}", target.alias)).await;
+            return err_json(StatusCode::BAD_GATEWAY, &format!("联系「{}」失败: {e}", target.alias));
+        }
     };
     if !resp.status().is_success() {
+        state.set_msg_status(msg_id, "fail").await;
         return err_json(StatusCode::BAD_GATEWAY, &format!("prepare-upload 返回 {}", resp.status()));
     }
     let parsed: serde_json::Value = match resp.json().await {
         Ok(v) => v,
-        Err(_) => return err_json(StatusCode::BAD_GATEWAY, "prepare-upload 响应异常"),
+        Err(_) => {
+            state.set_msg_status(msg_id, "fail").await;
+            return err_json(StatusCode::BAD_GATEWAY, "prepare-upload 响应异常");
+        }
     };
     let session_id = parsed.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
     let token = parsed
@@ -700,6 +725,7 @@ async fn ui_send(
         .or_else(|| parsed.pointer("/files/f0/token").and_then(|v| v.as_str()))
         .unwrap_or("");
     if session_id.is_empty() || token.is_empty() {
+        state.set_msg_status(msg_id, "fail").await;
         return err_json(StatusCode::BAD_GATEWAY, "对方未接受文件");
     }
 
@@ -771,19 +797,8 @@ async fn ui_send(
 
     match result {
         Ok(r) if r.status().is_success() => {
+            state.set_msg_status(msg_id, "ok").await;
             state.log_event(format!("已送达「{}」：{}", target.alias, name)).await;
-            let msg_id = state
-                .push_chat(crate::state::ChatMsg {
-                    out: true,
-                    peer: target.fingerprint.clone(),
-                    peer_alias: target.alias.clone(),
-                    kind: "file".into(),
-                    name: name.clone(),
-                    size,
-                    at: now_ms(),
-                    ..Default::default()
-                })
-                .await;
             if keep_img {
                 // 先取走缓冲再 await：MutexGuard 非 Send，不能跨 await 持有
                 let taken = spill
@@ -798,11 +813,13 @@ async fn ui_send(
             Json(json!({"ok": true})).into_response()
         }
         Ok(r) => {
+            state.set_msg_status(msg_id, "fail").await;
             let msg = format!("对方返回 {}", r.status());
             state.log_event(format!("发送 {} 失败：{msg}", name)).await;
             err_json(StatusCode::BAD_GATEWAY, &msg)
         }
         Err(e) => {
+            state.set_msg_status(msg_id, "fail").await;
             state.log_event(format!("发送 {} 失败: {e}", name)).await;
             err_json(StatusCode::BAD_GATEWAY, &format!("上传失败: {e}"))
         }
@@ -819,24 +836,29 @@ async fn ui_send_text(State(state): State<Shared>, axum::Json(body): axum::Json<
     let Some(target) = state.devices.lock().await.get(&body.target).cloned() else {
         return err_json(StatusCode::NOT_FOUND, "目标设备不存在");
     };
+    // 先落 sending 消息（⏳ 立即可见），失败置 ⚠（会话流留痕，无需回填输入框）
+    let msg_id = state
+        .push_chat(crate::state::ChatMsg {
+            out: true,
+            peer: target.fingerprint.clone(),
+            peer_alias: target.alias.clone(),
+            kind: "text".into(),
+            text: body.text.clone(),
+            at: now_ms(),
+            status: "sending".into(),
+            ..Default::default()
+        })
+        .await;
     let item = crate::client::item_from_text(body.text.clone());
-    let sent_text = body.text.clone();
     match crate::client::send(&state, &http_client(), &target, vec![item]).await {
         Ok(()) => {
-            state
-                .push_chat(crate::state::ChatMsg {
-                    out: true,
-                    peer: target.fingerprint.clone(),
-                    peer_alias: target.alias.clone(),
-                    kind: "text".into(),
-                    text: sent_text,
-                    at: now_ms(),
-                    ..Default::default()
-                })
-                .await;
+            state.set_msg_status(msg_id, "ok").await;
             Json(json!({"ok": true})).into_response()
         }
-        Err(e) => err_json(StatusCode::BAD_GATEWAY, &format!("{e:#}")),
+        Err(e) => {
+            state.set_msg_status(msg_id, "fail").await;
+            err_json(StatusCode::BAD_GATEWAY, &format!("{e:#}"))
+        }
     }
 }
 
@@ -1008,9 +1030,12 @@ async fn ui_asset(State(state): State<Shared>, Query(q): Query<UiAssetQuery>) ->
     }
 }
 
-/// 面板/客户端共用的 reqwest：忽略自签证书、不走代理（纯内网）
+/// 面板/客户端共用的 reqwest：忽略自签证书、不走代理（纯内网）。
+/// 只设连接超时（离线对端 5s 内失败）；总超时会掐断大文件上传，需总时限的
+/// 单次请求在调用处用 RequestBuilder::timeout 另加
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
         .danger_accept_invalid_certs(true)
         .use_rustls_tls()
         .no_proxy()
