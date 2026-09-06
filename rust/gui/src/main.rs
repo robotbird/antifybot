@@ -86,19 +86,26 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("AntifyBot 运行失败")
-        .run(|app, event| {
-            // macOS：窗口收进托盘后，点 Dock 图标重新唤起
-            if let tauri::RunEvent::Reopen {
-                has_visible_windows,
-                ..
-            } = event
-            {
-                if !has_visible_windows {
-                    show_main_window(app);
-                }
-            }
-        });
+        .run(handle_run_event);
 }
+
+/// macOS：窗口收进托盘后，点 Dock 图标重新唤起
+#[cfg(target_os = "macos")]
+fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    if let tauri::RunEvent::Reopen {
+        has_visible_windows,
+        ..
+    } = event
+    {
+        if !has_visible_windows {
+            show_main_window(app);
+        }
+    }
+}
+
+/// Windows：无 Dock 重开事件，无需处理
+#[cfg(not(target_os = "macos"))]
+fn handle_run_event(_app: &tauri::AppHandle, _event: tauri::RunEvent) {}
 
 /// 唤起主窗口（显示 + 聚焦）
 fn show_main_window(app: &tauri::AppHandle) {
