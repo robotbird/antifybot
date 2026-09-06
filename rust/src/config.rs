@@ -13,6 +13,9 @@ pub const DEFAULT_PORT: u16 = 53317;
 #[derive(Serialize, Deserialize)]
 struct ConfigFile {
     alias: String,
+    /// 设置面板改过的保存目录（无此字段 = 仍是默认 ~/Downloads/AntifyBot）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    download_dir: Option<String>,
 }
 
 pub struct Identity {
@@ -41,16 +44,25 @@ impl Identity {
 
         let cfg_path = cfg_dir.join("config.json");
         let mut saved_alias = None;
+        let mut saved_dir = None;
         if let Ok(text) = std::fs::read_to_string(&cfg_path) {
-            saved_alias = serde_json::from_str::<ConfigFile>(&text).ok().map(|c| c.alias);
+            if let Ok(c) = serde_json::from_str::<ConfigFile>(&text) {
+                saved_alias = Some(c.alias);
+                saved_dir = c.download_dir.filter(|s| !s.trim().is_empty());
+            }
         }
         let alias = alias
             .or(saved_alias.clone())
             .unwrap_or_else(default_alias);
         if persist_alias && saved_alias.as_deref() != Some(alias.as_str()) {
+            // 写别名时保留已保存的 download_dir 字段
             let _ = std::fs::write(
                 &cfg_path,
-                serde_json::to_string_pretty(&ConfigFile { alias: alias.clone() }).unwrap(),
+                serde_json::to_string_pretty(&ConfigFile {
+                    alias: alias.clone(),
+                    download_dir: saved_dir.clone(),
+                })
+                .unwrap(),
             );
         }
 
@@ -80,7 +92,10 @@ impl Identity {
             }
         };
 
-        let download_dir = dir.unwrap_or_else(|| home.join("Downloads").join("AntifyBot"));
+        // 启动优先级：显式 --dir > 设置面板保存过的目录 > 默认 ~/Downloads/AntifyBot
+        let download_dir = dir
+            .or_else(|| saved_dir.map(PathBuf::from))
+            .unwrap_or_else(|| home.join("Downloads").join("AntifyBot"));
         std::fs::create_dir_all(&download_dir).ok(); // 失败留待接收时再报
 
         Ok(Self {
@@ -123,6 +138,22 @@ impl Identity {
             "download": false,
         })
     }
+}
+
+/// 设置面板改保存目录：整写 config.json（保留别名等既有字段）
+pub fn save_download_dir(dir: &std::path::Path) -> Result<()> {
+    let home = dirs::home_dir().context("无法定位用户主目录")?;
+    let cfg_path = home.join(".antifybot-rs").join("config.json");
+    let mut cfg = std::fs::read_to_string(&cfg_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<ConfigFile>(&t).ok())
+        .unwrap_or_else(|| ConfigFile {
+            alias: default_alias(),
+            download_dir: None,
+        });
+    cfg.download_dir = Some(dir.to_string_lossy().to_string());
+    std::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap())
+        .with_context(|| format!("写 {}", cfg_path.display()))
 }
 
 fn cert_fingerprint(pem: &[u8]) -> Result<String> {

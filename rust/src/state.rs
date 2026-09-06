@@ -137,6 +137,8 @@ pub struct PickJob {
 
 pub struct AppState {
     pub identity: crate::config::Identity,
+    /// 当前保存目录（初值 = identity.download_dir；设置面板可改，写穿 config.json）
+    pub download_dir: tokio::sync::RwLock<PathBuf>,
     /// SQLite（消息真源 + 设备写穿副本），见 db.rs
     pub db: crate::db::Db,
     /// 构造时 Inline；CLI serve 在 start_node 返回后换成 Bridge（tokio Mutex 便于原地换）
@@ -251,14 +253,15 @@ impl AppState {
         }
     }
 
-    /// 下载目录里不冲突的落盘路径（同名自动加 " (n)"）
-    pub fn resolve_path(&self, raw_name: &str) -> PathBuf {
+    /// 下载目录里不冲突的落盘路径（同名自动加 " (n)"）。
+    /// 目录读自 RwLock（设置面板改目录后即刻生效）
+    pub async fn resolve_path(&self, raw_name: &str) -> PathBuf {
         let safe = raw_name
             .rsplit(['/', '\\'])
             .next()
             .filter(|s| !s.is_empty() && *s != "." && *s != "..")
             .unwrap_or("file");
-        let dir = &self.identity.download_dir;
+        let dir = self.download_dir.read().await.clone();
         let mut candidate = dir.join(safe);
         if !candidate.exists() {
             return candidate;

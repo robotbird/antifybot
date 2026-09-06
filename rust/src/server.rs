@@ -43,6 +43,9 @@ pub fn build_panel_router(state: Shared) -> Router {
         .route("/api/ui/retry", post(ui_retry))
         .route("/api/ui/reveal", post(ui_reveal))
         .route("/api/ui/asset", get(ui_asset))
+        .route("/api/ui/set-dir", post(ui_set_dir))
+        .route("/api/ui/check-update", post(ui_check_update))
+        .route("/api/ui/open-url", post(ui_open_url))
         .with_state(state)
 }
 
@@ -342,13 +345,13 @@ async fn upload(
     state.rx_total.store(size, Ordering::Relaxed);
     state.rx_bytes.store(0, Ordering::Relaxed);
 
-    let final_path = state.resolve_path(&file_name);
+    let final_path = state.resolve_path(&file_name).await;
     let part_path = {
         let mut p = final_path.clone().into_os_string();
         p.push(".part");
         std::path::PathBuf::from(p)
     };
-    std::fs::create_dir_all(&state.identity.download_dir).ok();
+    std::fs::create_dir_all(state.download_dir.read().await.as_os_str()).ok();
     let Ok(mut out) = tokio::fs::File::create(&part_path).await else {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, "无法创建临时文件");
     };
@@ -640,7 +643,8 @@ async fn ui_state(State(state): State<Shared>) -> Response {
             "fingerprint": id.fingerprint,
             "port": id.port,
             "version": crate::config::PROTOCOL_VERSION,
-            "dir": id.download_dir.display().to_string(),
+            "appVersion": env!("CARGO_PKG_VERSION"),
+            "dir": state.download_dir.read().await.display().to_string(),
         },
         "devices": devices,
         "received": received,
@@ -1160,7 +1164,8 @@ struct UiReveal {
 }
 
 async fn ui_reveal(State(state): State<Shared>, axum::Json(body): axum::Json<UiReveal>) -> Response {
-    let dir = state.identity.download_dir.canonicalize().unwrap_or(state.identity.download_dir.clone());
+    let dl = state.download_dir.read().await.clone();
+    let dir = dl.canonicalize().unwrap_or(dl);
     let path = dir.join(&body.file);
     // 必须真实存在才能 canonicalize 成功；解析失败（含 .. 穿越、不存在）一律拒绝，
     // 之后 starts_with 在两条已解析路径上比较，不可被词法绕过
@@ -1242,7 +1247,8 @@ async fn ui_asset(State(state): State<Shared>, Query(q): Query<UiAssetQuery>) ->
     let Some(ct) = img_content_type(&name) else {
         return err_json(StatusCode::FORBIDDEN, "仅支持图片文件");
     };
-    let dir = state.identity.download_dir.canonicalize().unwrap_or(state.identity.download_dir.clone());
+    let dl = state.download_dir.read().await.clone();
+    let dir = dl.canonicalize().unwrap_or(dl);
     // 与 ui_reveal 同款防线：先解析再前缀比较，挡住 .. 穿越与不存在路径
     let Ok(canon) = dir.join(&name).canonicalize() else {
         return err_json(StatusCode::FORBIDDEN, "路径越界");
@@ -1279,8 +1285,10 @@ pub fn http_client() -> reqwest::Client {
 /// 供 main 使用的共享构造（打开 SQLite，失败即上层报错退出）
 pub fn new_state(identity: crate::config::Identity) -> anyhow::Result<Shared> {
     let db = crate::db::Db::open(&identity.cfg_dir.join("chat.db"))?;
+    let dl = identity.download_dir.clone();
     Ok(Arc::new(crate::state::AppState {
         identity,
+        download_dir: tokio::sync::RwLock::new(dl),
         db,
         picker: tokio::sync::Mutex::new(crate::state::Picker::Inline),
         devices: Default::default(),
@@ -1294,4 +1302,131 @@ pub fn new_state(identity: crate::config::Identity) -> anyhow::Result<Shared> {
         rx_total: Default::default(),
         rx_name: Default::default(),
     }))
+}
+
+// ═══════════════ 设置面板 API ═══════════════
+
+#[derive(Deserialize)]
+struct UiSetDir {
+    dir: String,
+}
+
+/// 改保存目录：建目录（不存在则创建）→ 可写探测 → 写 config.json → 换内存值。
+/// reveal/asset 的越界防线按解析后路径比较，这里先 canonicalize，展示与防线一致
+async fn ui_set_dir(State(state): State<Shared>, axum::Json(body): axum::Json<UiSetDir>) -> Response {
+    if body.dir.trim().is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "目录不能为空");
+    }
+    if let Err(e) = std::fs::create_dir_all(&body.dir) {
+        return err_json(StatusCode::BAD_REQUEST, &format!("目录不可用: {e}"));
+    }
+    let dir = match std::path::PathBuf::from(&body.dir).canonicalize() {
+        Ok(d) => d,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, &format!("目录不可用: {e}")),
+    };
+    // 可写探测：临时文件建了就删
+    let probe = dir.join(format!(".antify-probe-{}", uuid::Uuid::new_v4()));
+    if let Err(e) = std::fs::File::create(&probe).and_then(|_| std::fs::remove_file(&probe)) {
+        return err_json(StatusCode::BAD_REQUEST, &format!("目录不可写: {e}"));
+    }
+    if let Err(e) = crate::config::save_download_dir(&dir) {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("保存失败: {e:#}"));
+    }
+    *state.download_dir.write().await = dir.clone();
+    state.log_event(format!("保存目录已改为 {}", dir.display())).await;
+    Json(json!({"ok": true, "dir": dir.display().to_string()})).into_response()
+}
+
+/// 版本比较：latest 每段数值大于 current 才算更新（v 前缀 / -pre 后缀容忍，段解析失败按 0）
+fn version_newer(latest: &str, current: &str) -> bool {
+    let nums = |s: &str| -> Vec<u64> {
+        s.trim_start_matches('v')
+            .split('-')
+            .next()
+            .unwrap_or("")
+            .split('.')
+            .map(|p| p.trim().parse().unwrap_or(0))
+            .collect()
+    };
+    let (a, b) = (nums(latest), nums(current));
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+/// 检查更新：GitHub Releases 最新 tag 与当前版本比较。
+/// 与 http_client() 相反——这里必须走系统代理（国内直连不到 GitHub），
+/// 且要带 User-Agent（GitHub API 强制要求）
+async fn ui_check_update() -> Response {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent(format!("AntifyBot/{}", env!("CARGO_PKG_VERSION")))
+        .use_rustls_tls()
+        .build()
+        .expect("reqwest client");
+    let resp = match client
+        .get("https://api.github.com/repos/robotbird/antifybot/releases/latest")
+        .header(header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return err_json(StatusCode::BAD_GATEWAY, &format!("检查更新失败: {e}")),
+    };
+    if !resp.status().is_success() {
+        return err_json(StatusCode::BAD_GATEWAY, &format!("GitHub 返回 {}", resp.status()));
+    }
+    let Ok(v) = resp.json::<serde_json::Value>().await else {
+        return err_json(StatusCode::BAD_GATEWAY, "GitHub 响应解析失败");
+    };
+    let tag = v.get("tag_name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if tag.is_empty() {
+        return err_json(StatusCode::BAD_GATEWAY, "还没有已发布版本");
+    }
+    Json(json!({
+        "current": env!("CARGO_PKG_VERSION"),
+        "latest": tag,
+        "newer": version_newer(&tag, env!("CARGO_PKG_VERSION")),
+        "url": v.get("html_url").and_then(|x| x.as_str()).unwrap_or(""),
+        "notes": v.get("body").and_then(|x| x.as_str()).unwrap_or(""),
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct UiOpenUrl {
+    url: String,
+}
+
+/// 系统浏览器打开（WebView 里 window.open / target=_blank 不可靠）。
+/// 仅放行本仓库 GitHub 页面——面板是唯一调用方，别让它变成任意打开器
+async fn ui_open_url(axum::Json(body): axum::Json<UiOpenUrl>) -> Response {
+    let allowed = [
+        "https://github.com/robotbird/antifybot",
+        "https://api.github.com/repos/robotbird/antifybot",
+    ];
+    if !allowed.iter().any(|a| body.url.starts_with(a)) {
+        return err_json(StatusCode::FORBIDDEN, "仅允许打开 GitHub 仓库页面");
+    }
+    #[cfg(target_os = "macos")]
+    let ok = std::process::Command::new("open").arg(&body.url).spawn().is_ok();
+    #[cfg(target_os = "windows")]
+    let ok = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &body.url])
+        .spawn()
+        .is_ok();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let ok = std::process::Command::new("xdg-open").arg(&body.url).spawn().is_ok();
+    #[cfg(not(any(unix, target_os = "windows")))]
+    let ok = false;
+    if ok {
+        Json(json!({"ok": true})).into_response()
+    } else {
+        err_json(StatusCode::INTERNAL_SERVER_ERROR, "无法打开浏览器")
+    }
 }
