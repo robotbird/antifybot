@@ -189,7 +189,7 @@ async fn discover(secs: u64, alias: Option<String>) -> anyhow::Result<()> {
         println!("（没有发现任何设备）");
         return Ok(());
     }
-    println!("{:<24} {:<8} {:<22} {}", "别名", "版本", "地址", "指纹");
+    println!("{:<24} {:<8} {:<22} 指纹", "别名", "版本", "地址");
     for d in devices.values() {
         println!(
             "{:<24} {:<8} {:<22} {}…",
