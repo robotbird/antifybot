@@ -37,6 +37,7 @@ pub fn build_panel_router(state: Shared) -> Router {
         .route("/api/ui/send", post(ui_send))
         .route("/api/ui/send-text", post(ui_send_text))
         .route("/api/ui/add", post(ui_add))
+        .route("/api/ui/remove-device", post(ui_remove_device))
         .route("/api/ui/reveal", post(ui_reveal))
         .route("/api/ui/asset", get(ui_asset))
         .with_state(state)
@@ -882,6 +883,20 @@ async fn ui_add(State(state): State<Shared>, axum::Json(body): axum::Json<UiAdd>
         Ok(r) => err_json(StatusCode::BAD_GATEWAY, &format!("对方返回 {}", r.status())),
         Err(e) => err_json(StatusCode::BAD_GATEWAY, &format!("连不上 {url}: {e}")),
     }
+}
+
+#[derive(Deserialize)]
+struct UiRemoveDevice {
+    fingerprint: String,
+}
+
+/// 从列表移除设备（内存 + DB；消息历史保留，对方再上线自动回来）
+async fn ui_remove_device(State(state): State<Shared>, axum::Json(body): axum::Json<UiRemoveDevice>) -> Response {
+    if state.devices.lock().await.get(&body.fingerprint).is_none() {
+        return err_json(StatusCode::NOT_FOUND, "设备不存在");
+    }
+    state.remove_device(&body.fingerprint).await;
+    Json(json!({"ok": true})).into_response()
 }
 
 #[derive(Deserialize)]

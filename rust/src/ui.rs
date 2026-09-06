@@ -71,6 +71,18 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .dev.dropover{outline:1.5px solid var(--accent);background:var(--side-hover)}
   body.dropping .dev{outline-color:var(--accent)}
+  /* 离线设备：保留可见但置灰排后；hover 出 ✕ 移除按钮 */
+  .dev.off{opacity:.55}
+  .dev .xbtn{flex:none;width:20px;height:20px;border:none;border-radius:6px;
+    background:transparent;color:var(--side-muted);font-size:11px;line-height:1;
+    display:none;place-items:center;cursor:pointer;transition:.15s}
+  .dev:hover .xbtn{display:grid}
+  .dev .xbtn:hover{background:rgba(255,99,72,.28);color:#ff8a80}
+  /* 出站消息状态行（发送中 / 已送达 / 未送达+重试） */
+  .st{margin-top:3px;font-size:11px;color:var(--muted)}
+  .st .rbtn{border:none;background:transparent;padding:0;font:inherit;font-weight:600;
+    color:var(--err);cursor:pointer}
+  .st .rbtn:hover{text-decoration:underline}
   .devempty{margin:12px 8px;padding:20px 10px;text-align:center;font-size:12.5px;
     color:var(--side-muted);border:1.5px dashed var(--side-line);border-radius:12px}
   .devempty small{font-size:11px;opacity:.8}
@@ -372,7 +384,9 @@ const fmtSize = n => { n=+n||0;
   if(n<1048576) return (n/1024).toFixed(1)+' KB';
   if(n<1073741824) return (n/1048576).toFixed(1)+' MB';
   return (n/1073741824).toFixed(2)+' GB'; };
-const fmtAgo = ms => ms<3000?'刚刚':ms<60000?Math.round(ms/1000)+' 秒前':ms<3600000?Math.round(ms/60000)+' 分钟前':Math.round(ms/3600000)+' 小时前';
+const fmtAgo = ms => ms<3000?'刚刚':ms<60000?Math.round(ms/1000)+' 秒前':ms<3600000?Math.round(ms/60000)+' 分钟前'
+  :ms<86400000?Math.round(ms/3600000)+' 小时前':ms<30*86400000?Math.round(ms/86400000)+' 天前'
+  :new Date(Date.now()-ms).toLocaleDateString('zh-CN');
 const fmtTime = ms => new Date(ms).toLocaleTimeString('zh-CN',{hour12:false});
 // 图片判定（与服务端 /api/ui/asset 的扩展名白名单保持一致）
 const IMG_RE = /\.(png|jpe?g|jfif|gif|webp|bmp|heic|heif|avif)$/i;
@@ -382,7 +396,7 @@ let lastReceivedAt = 0, lastDevJson = '', lastRxJson = '', firstRender = true;
 let sel = null;            // 当前选中的设备指纹（null = 未选，主区显示等待屏）
 let pendingTarget = null;  // filepick 的目标
 let lastChatKey = '', lastChatSel = null; // 会话气泡防抖重绘 + 切换会话时强制贴底
-const seenFp = new Set();
+const onlineMap = new Map(); // fp → 上一轮在线态（翻转时提醒上线/离线）
 
 function toast(msg, err){
   const box = $('toasts');
@@ -423,32 +437,44 @@ function render(s){
   window._state = s;
 
   // ── 侧栏设备（内容有变化才重绘，避免打断 hover / 拖放） ──
-  // 微信会话列表式：第二行显示与该设备的最近一条消息预览
+  // 微信会话列表式：第二行显示与该设备的最近一条消息预览；离线设备置灰保留
   const lastByFp = {};
   for (const m of (s.chat||[])) lastByFp[m.peer] = m;
-  const dj = JSON.stringify(s.devices) + '|' +
-    s.devices.map(d => (lastByFp[d.fingerprint]||{}).id || 0).join(',');
+  // 防抖 key：lastSeenMs 每轮轮询都在变，按分钟分桶；identity/在线态/预览 id 变了才重绘
+  const dj = s.devices.map(d =>
+    d.fingerprint + ':' + d.alias + ':' + d.ip + ':' + (d.online?1:0) + ':' +
+    Math.floor(d.lastSeenMs/60000) + ':' + ((lastByFp[d.fingerprint]||{}).id||0)
+  ).join('|');
   if (dj !== lastDevJson){
     lastDevJson = dj;
     const box = $('devices');
     box.innerHTML = '';
     $('devempty').hidden = s.devices.length > 0;
-    $('devcount').textContent = s.devices.length ? '· ' + s.devices.length : '';
+    const onlineN = s.devices.filter(d => d.online).length;
+    $('devcount').textContent = s.devices.length
+      ? `· 在线${onlineN}/${s.devices.length}` : '';
     for (const d of s.devices){
       const row = document.createElement('div');
-      row.className = 'dev' + (d.fingerprint === sel ? ' on' : '');
+      row.className = 'dev' + (d.fingerprint === sel ? ' on' : '') + (d.online ? '' : ' off');
       row.dataset.fp = d.fingerprint; row.tabIndex = 0; row.title = d.alias;
       const ico = document.createElement('div'); ico.className = 'ico'; ico.textContent = emoji(d);
       const mid = document.createElement('div'); mid.className = 'mid';
       const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = d.alias;
       const meta = document.createElement('div'); meta.className = 'meta';
       const lm = lastByFp[d.fingerprint];
-      meta.textContent = lm
+      const preview = lm
         ? (lm.kind === 'text'
             ? lm.text.replace(/\s+/g, ' ').slice(0, 42)
             : (isImg(lm.name) ? '[图片]' : '📄 ' + lm.name))
-        : `${d.deviceType || '?'} · ${d.ip}`;
-      mid.append(nm, meta); row.append(ico, mid);
+        : '';
+      meta.textContent = d.online
+        ? (preview || `${d.deviceType || '?'} · ${d.ip}`)
+        : (preview ? `离线 · ${preview}` : `离线 · 最后可见 ${fmtAgo(d.lastSeenMs)}`);
+      mid.append(nm, meta);
+      const x = document.createElement('button'); x.className = 'xbtn';
+      x.textContent = '✕'; x.title = '从列表移除';
+      x.onclick = e => { e.stopPropagation(); removeDevice(d); };
+      row.append(ico, mid, x);
       row.onclick = () => { sel = (sel === d.fingerprint ? null : d.fingerprint); syncSel(); };
       // 拖文件到设备行 = 发给这台设备
       row.ondragover = e => { if (hasFiles(e)){ e.preventDefault();
@@ -463,17 +489,23 @@ function render(s){
     }
   }
 
-  // 上线 / 重新上线提醒（首轮静默；离线超过服务端 300s 过滤后移除记录）
+  // 上线 / 离线翻转提醒（按 online 布尔翻转，重上线会再提示；首轮静默）
   const nowFp = new Set(s.devices.map(d => d.fingerprint));
-  if (firstRender){ nowFp.forEach(f => seenFp.add(f)); firstRender = false; }
-  else {
+  if (firstRender){
+    for (const d of s.devices) onlineMap.set(d.fingerprint, d.online);
+    firstRender = false;
+  } else {
     for (const d of s.devices){
-      if (!seenFp.has(d.fingerprint)){ seenFp.add(d.fingerprint); toast(`上线:${d.alias}`); }
+      const prev = onlineMap.get(d.fingerprint);
+      if (prev === undefined || (!prev && d.online)) toast(`上线:${d.alias}`);
+      else if (prev && !d.online) toast(`离线:${d.alias}`);
+      onlineMap.set(d.fingerprint, d.online);
     }
-    for (const f of [...seenFp]) if (!nowFp.has(f)) seenFp.delete(f);
+    // 从列表消失（被移除的设备有自己的 toast）→ 静默清记录
+    for (const f of [...onlineMap.keys()]) if (!nowFp.has(f)) onlineMap.delete(f);
   }
 
-  // 选中设备掉线 → 回到等待屏
+  // 选中设备被移除 → 回到等待屏（离线设备保留在列表，不触发）
   if (sel && !s.devices.some(d => d.fingerprint === sel)) sel = null;
   // 正在收文件且没开任何会话 → 自动切到发送者的会话（进度卡可见）
   if (!sel && s.session && s.session.active){
@@ -539,12 +571,17 @@ function renderCenter(s){
   $('waitview').hidden = !!d;
   if (d){
     $('ch-name').textContent = d.alias;
-    $('ch-meta').textContent = `${d.deviceType || '?'} · ${d.ip} · ${fmtAgo(d.lastSeenMs)}可见`;
+    $('ch-meta').textContent = d.online
+      ? `${d.deviceType || '?'} · ${d.ip} · ${fmtAgo(d.lastSeenMs)}可见`
+      : `离线 · 最后可见 ${fmtAgo(d.lastSeenMs)}`;
   } else {
-    $('c-title').textContent = '等待设备上线';
-    $('c-sub').textContent = s.devices.length
-      ? '点击左侧的设备开始发送'
-      : '同一 Wi-Fi 下的 LocalSend 设备会自动出现在左侧';
+    const allOff = s.devices.length && !s.devices.some(x => x.online);
+    $('c-title').textContent = allOff ? '设备暂不在线' : '等待设备上线';
+    $('c-sub').textContent = allOff
+      ? '左侧保留的设备仍可发送，送达需等对方上线'
+      : s.devices.length
+        ? '点击左侧的设备开始发送'
+        : '同一 Wi-Fi 下的 LocalSend 设备会自动出现在左侧';
     $('dropzone').textContent = '📁 拖入文件即可发送';
   }
 }
@@ -868,6 +905,21 @@ $('addok').onclick = async () => {
     else toast(v.error || '添加失败', true);
   }catch(e){ toast('添加失败:' + e.message, true); }
 };
+
+// 移除设备：内存 + DB 删行，消息历史保留（对方重新 announce 会自动回来）
+async function removeDevice(d){
+  try{
+    const r = await fetch('/api/ui/remove-device', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({fingerprint: d.fingerprint})});
+    const v = await r.json().catch(()=>({}));
+    if (r.ok){
+      if (sel === d.fingerprint) sel = null;
+      lastDevJson = ''; // 下一轮立即重绘侧栏
+      toast(`已移除「${d.alias}」，重新上线会自动出现`);
+    } else toast(v.error || '移除失败', true);
+  }catch(e){ toast('移除失败:' + e.message, true); }
+}
 
 // 在文件管理器中显示
 async function reveal(file){
