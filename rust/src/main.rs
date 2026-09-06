@@ -134,8 +134,39 @@ async fn serve(
     println!("│ 多播发现 : {}", if multicast { "开启（224.0.0.167:53317）" } else { "关闭" });
     println!("└────────────────────────────────────────────");
 
-    // 主线程挂起，直到 Ctrl-C
-    tokio::signal::ctrl_c().await?;
+    // 原生文件选择器桥：CLI 无 NSApplication，macOS 上 rfd 只能在主线程调。
+    // 面板的 /api/ui/pick 经 mpsc 转到这里；主线程同步轮询通道 + 退出标志
+    // （阻塞主线程不影响 worker 线程上的发现/收发/面板任务）
+    let (pick_tx, pick_rx) = std::sync::mpsc::channel::<state::PickJob>();
+    *state.picker.lock().await = state::Picker::Bridge(pick_tx);
+    let (quit_tx, quit_rx) = std::sync::mpsc::channel::<()>();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = quit_tx.send(());
+    });
+    loop {
+        match pick_rx.recv_timeout(Duration::from_millis(300)) {
+            Ok(job) => {
+                let state::PickJob { folder, reply } = job;
+                // 选择框期间主线程阻塞是预期行为；panic（异常环境）降级为「取消」
+                let picked = std::panic::catch_unwind(move || {
+                    if folder {
+                        rfd::FileDialog::new().pick_folder().map(|p| vec![p])
+                    } else {
+                        rfd::FileDialog::new().pick_files()
+                    }
+                })
+                .unwrap_or(None);
+                let _ = reply.send(picked);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if quit_rx.try_recv().is_ok() {
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
     println!("再见 👋");
     Ok(())
 }

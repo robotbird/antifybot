@@ -121,10 +121,26 @@ pub struct ChatMsg {
     pub src_path: String,
 }
 
+/// 原生文件选择器的接入方式（macOS 的 rfd 同步 API 依赖 NSApplication）：
+/// - Inline：GUI（Tauri 已运行 NSApp）—— 工作线程直接调，rfd 自动派发主线程
+/// - Bridge：CLI `serve`（无 NSApp，非主线程调用会 panic）—— 请求经 mpsc 转主线程代调
+pub enum Picker {
+    Inline,
+    Bridge(std::sync::mpsc::Sender<PickJob>),
+}
+
+/// 主线程代调任务：folder=false 选文件（可多选），true 选文件夹
+pub struct PickJob {
+    pub folder: bool,
+    pub reply: tokio::sync::oneshot::Sender<Option<Vec<PathBuf>>>,
+}
+
 pub struct AppState {
     pub identity: crate::config::Identity,
     /// SQLite（消息真源 + 设备写穿副本），见 db.rs
     pub db: crate::db::Db,
+    /// 构造时 Inline；CLI serve 在 start_node 返回后换成 Bridge（tokio Mutex 便于原地换）
+    pub picker: Mutex<Picker>,
     pub devices: Mutex<HashMap<String, Device>>,
     pub session: Mutex<Option<Session>>,
     pub received: Mutex<Vec<ReceivedFile>>,

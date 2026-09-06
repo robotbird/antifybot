@@ -732,6 +732,37 @@ $('filepick').onchange = async () => {
   pendingTarget = null;
 };
 
+// ── 原生选择器（服务端 rfd）+ 路径发送（记录 src_path，失败可重试） ──
+// 目录会由服务端递归展开，每个文件独立气泡
+async function sendPaths(fp, paths){
+  sel = fp; syncSel();
+  for (const p of paths){
+    try{
+      const r = await fetch('/api/ui/send-path', {method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({target: fp, path: p})});
+      const v = await r.json().catch(()=>({}));
+      if (!r.ok && !((v.ids||[]).length)){ toast(v.error || '发送失败', true); break; }
+      if (!r.ok && v.error) toast(v.error, true); // 部分成功：失败项已有 ⚠ 气泡
+    }catch(e){ toast('发送失败:' + e.message, true); break; }
+  }
+}
+
+// 原生选择优先；服务端不支持（无桌面环境）或请求失败 → 回退浏览器 <input>（流式，无重试）
+async function pickNative(kind, fp){
+  let v = null, ok = false;
+  try{
+    const r = await fetch('/api/ui/pick', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({kind})});
+    v = await r.json().catch(()=>null);
+    ok = r.ok;
+  }catch(_){}
+  if (ok && v && (v.paths === null || Array.isArray(v.paths))){
+    if (Array.isArray(v.paths) && v.paths.length) sendPaths(fp, v.paths);
+    return; // paths:null / [] = 用户取消
+  }
+  (kind === 'folder' ? pickThenFolder : pickThenFile)(fp);
+}
+
 // 目标解析：已选中 → 它；仅 1 台 → 它；多台 → 弹选择；0 台 → 报错
 function resolveTarget(cb){
   const ds = (window._state && window._state.devices) || [];
@@ -757,7 +788,7 @@ function openPick(cb){
 }
 $('pickcancel').onclick = () => $('pickdlg').close();
 
-$('btn-file').onclick = () => resolveTarget(fp => pickThenFile(fp));
+$('btn-file').onclick = () => resolveTarget(fp => pickNative('file', fp));
 
 // 主区拖放区：松开即按目标解析发送
 const dz = $('dropzone');
@@ -802,10 +833,10 @@ $('chatinput').addEventListener('keydown', e => {
 });
 
 // ── 输入框工具行（微信式：左下角 文件/文件夹/剪贴板，右侧发送） ──
-// 文件：选择文件发给当前会话（未选设备则先解析目标）
+// 文件/文件夹：原生选择器优先（带源路径、失败可重试），不支持再回退浏览器选择
 $('btn-cfile').onclick = () => {
-  if (sel) pickThenFile(sel);
-  else resolveTarget(fp => pickThenFile(fp));
+  if (sel) pickNative('file', sel);
+  else resolveTarget(fp => pickNative('file', fp));
 };
 
 // 文件夹：webkitdirectory 一次选中整棵目录，逐个文件发送（接收端按文件名平铺保存）
@@ -822,8 +853,8 @@ $('folderpick').onchange = () => {
   pendingFolderTarget = null;
 };
 $('btn-cfolder').onclick = () => {
-  if (sel) pickThenFolder(sel);
-  else resolveTarget(fp => pickThenFolder(fp));
+  if (sel) pickNative('folder', sel);
+  else resolveTarget(fp => pickNative('folder', fp));
 };
 
 // 剪贴板：图片（截图场景）直接作为文件发送，文本填入输入框待编辑；

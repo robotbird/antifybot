@@ -38,6 +38,9 @@ pub fn build_panel_router(state: Shared) -> Router {
         .route("/api/ui/send-text", post(ui_send_text))
         .route("/api/ui/add", post(ui_add))
         .route("/api/ui/remove-device", post(ui_remove_device))
+        .route("/api/ui/pick", post(ui_pick))
+        .route("/api/ui/send-path", post(ui_send_path))
+        .route("/api/ui/retry", post(ui_retry))
         .route("/api/ui/reveal", post(ui_reveal))
         .route("/api/ui/asset", get(ui_asset))
         .with_state(state)
@@ -922,6 +925,236 @@ async fn ui_remove_device(State(state): State<Shared>, axum::Json(body): axum::J
 }
 
 #[derive(Deserialize)]
+struct UiPick {
+    kind: String, // "file" | "folder"
+}
+
+/// 弹原生文件/文件夹选择框。GUI（Inline）在工作线程直接调 rfd；
+/// CLI（Bridge）把任务转给主线程。返回 {paths:[…]}，用户取消为 {paths:null}。
+/// 环境不支持（panic 被 catch）返回 501，前端回退浏览器 <input>。
+async fn ui_pick(State(state): State<Shared>, axum::Json(body): axum::Json<UiPick>) -> Response {
+    let folder = match body.kind.as_str() {
+        "file" => false,
+        "folder" => true,
+        _ => return err_json(StatusCode::BAD_REQUEST, "kind 须为 file 或 folder"),
+    };
+    let picker = state.picker.lock().await;
+    match &*picker {
+        crate::state::Picker::Bridge(tx) => {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            if tx.send(crate::state::PickJob { folder, reply: reply_tx }).is_err() {
+                return err_json(StatusCode::SERVICE_UNAVAILABLE, "主线程选择器通道已关闭");
+            }
+            match reply_rx.await {
+                Ok(paths) => Json(json!({ "paths": paths })).into_response(),
+                Err(_) => err_json(StatusCode::INTERNAL_SERVER_ERROR, "选择器无响应"),
+            }
+        }
+        crate::state::Picker::Inline => {
+            // macOS 无 NSApp 时 rfd 会 panic → catch_unwind 后告知前端走兜底
+            let res = tokio::task::spawn_blocking(move || {
+                std::panic::catch_unwind(move || {
+                    if folder {
+                        rfd::FileDialog::new().pick_folder().map(|p| vec![p])
+                    } else {
+                        rfd::FileDialog::new().pick_files()
+                    }
+                })
+            })
+            .await;
+            match res {
+                Ok(Ok(paths)) => Json(json!({ "paths": paths })).into_response(),
+                Ok(Err(_)) => err_json(StatusCode::NOT_IMPLEMENTED, "此环境不支持原生选择器"),
+                Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("选择器任务失败: {e}")),
+            }
+        }
+    }
+}
+
+/// 路径展开：单文件 → [该文件]；目录 → 递归收集常规文件（跳过 . 开头段，含 .DS_Store/.git）
+fn collect_files(path: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let meta = std::fs::metadata(path).map_err(|e| anyhow::anyhow!("读取 {}: {e}", path.display()))?;
+    if meta.is_file() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    if !meta.is_dir() {
+        anyhow::bail!("{} 不是文件或目录", path.display());
+    }
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> anyhow::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let p = entry.path();
+            if p.is_dir() {
+                walk(&p, out)?;
+            } else if p.is_file() {
+                out.push(p);
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(path, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+#[derive(Deserialize)]
+struct UiSendPath {
+    target: String,
+    path: String,
+}
+
+/// 按本机路径发送（原生选择器返回的路径，或重试）：目录递归展开为多个独立气泡，
+/// 每条消息记录 src_path（重试从原路径重读重发，不复制缓存副本）
+async fn ui_send_path(State(state): State<Shared>, axum::Json(body): axum::Json<UiSendPath>) -> Response {
+    let Some(target) = state.devices.lock().await.get(&body.target).cloned() else {
+        return err_json(StatusCode::NOT_FOUND, "目标设备不存在（可能已被移除）");
+    };
+    let root = std::path::PathBuf::from(&body.path);
+    let files = match collect_files(&root) {
+        Ok(f) if f.is_empty() => return err_json(StatusCode::BAD_REQUEST, "没有可发送的文件"),
+        Ok(f) if f.len() > 1000 => {
+            return err_json(StatusCode::BAD_REQUEST, &format!("{} 个文件太多了（上限 1000）", f.len()))
+        }
+        Ok(f) => f,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, &format!("{e:#}")),
+    };
+
+    let client = http_client();
+    let mut ids = Vec::new();
+    let mut first_err: Option<String> = None;
+    for f in files {
+        // 先建 item（含 SHA-256 与真实 size）再落气泡
+        let item = match crate::client::item_from_path(f.clone()).await {
+            Ok(i) => i,
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(format!("{e:#}"));
+                }
+                continue;
+            }
+        };
+        let msg_id = state
+            .push_chat(crate::state::ChatMsg {
+                out: true,
+                peer: target.fingerprint.clone(),
+                peer_alias: target.alias.clone(),
+                kind: "file".into(),
+                name: item.file_name.clone(),
+                size: item.size,
+                at: now_ms(),
+                status: "sending".into(),
+                src_path: f.to_string_lossy().to_string(),
+                ..Default::default()
+            })
+            .await;
+        ids.push(msg_id);
+        match send_item(&state, &client, &target, item, Some(&f), msg_id).await {
+            Ok(()) => state.set_msg_status(msg_id, "ok").await,
+            Err(e) => {
+                state.set_msg_status(msg_id, "fail").await;
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+    }
+    match first_err {
+        None => Json(json!({ "ok": true, "ids": ids })).into_response(),
+        Some(e) => {
+            state.log_event(format!("路径发送部分失败：{e}")).await;
+            Json(json!({ "ok": false, "ids": ids, "error": e })).into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct UiRetry {
+    id: u64,
+}
+
+/// 重试未送达的出站消息：文本重发正文；文件从 src_path 原路径重读（源没了 → 保持 ⚠）。
+/// 发送时间 at 不动（气泡位置不变），仅状态流转
+async fn ui_retry(State(state): State<Shared>, axum::Json(body): axum::Json<UiRetry>) -> Response {
+    let Some(m) = state.db.get_msg(body.id) else {
+        return err_json(StatusCode::NOT_FOUND, "消息不存在");
+    };
+    if !m.out {
+        return err_json(StatusCode::BAD_REQUEST, "收到的消息无需重试");
+    }
+    if m.status == "sending" {
+        return err_json(StatusCode::CONFLICT, "该消息正在发送中");
+    }
+    if m.status != "fail" {
+        return err_json(StatusCode::BAD_REQUEST, "该消息已送达");
+    }
+    let Some(target) = state.devices.lock().await.get(&m.peer).cloned() else {
+        return err_json(StatusCode::BAD_REQUEST, "设备已从列表移除，无法重试");
+    };
+    state.set_msg_status(m.id, "sending").await;
+    let client = http_client();
+    let res = if m.kind == "text" {
+        let item = crate::client::item_from_text(m.text.clone());
+        crate::client::send(&state, &client, &target, vec![item])
+            .await
+            .map_err(|e| format!("{e:#}"))
+    } else if !m.src_path.is_empty() {
+        let p = std::path::PathBuf::from(&m.src_path);
+        match crate::client::item_from_path(p.clone()).await {
+            Ok(item) => send_item(&state, &client, &target, item, Some(&p), m.id).await,
+            Err(e) => Err(format!("{e:#}")), // 源文件已删/不可读：状态保持 fail
+        }
+    } else {
+        // 流式中转无源路径——正常 UI 不给按钮，防御分支
+        state.set_msg_status(m.id, "fail").await;
+        return err_json(StatusCode::BAD_REQUEST, "该消息没有源文件可重试（请重新拖入）");
+    };
+    match res {
+        Ok(()) => {
+            state.set_msg_status(m.id, "ok").await;
+            state.log_event(format!("重试成功：{}", if m.kind == "text" { "文字消息" } else { &m.name })).await;
+            Json(json!({ "ok": true })).into_response()
+        }
+        Err(e) => {
+            state.set_msg_status(m.id, "fail").await;
+            err_json(StatusCode::BAD_GATEWAY, &e)
+        }
+    }
+}
+
+/// 发一个已构造好的 item（send-path / retry 共用）→ client::send。
+/// 成功且 cache_src 指向 ≤8MB 图片时读盘回显进内存缓存
+async fn send_item(
+    state: &Shared,
+    client: &reqwest::Client,
+    target: &crate::state::Device,
+    item: crate::client::SendItem,
+    cache_src: Option<&std::path::Path>,
+    msg_id: u64,
+) -> Result<(), String> {
+    const IMG_SPILL_MAX: u64 = 8 * 1024 * 1024;
+    let is_img = cache_src.is_some()
+        && item.mime.starts_with("image/")
+        && item.size > 0
+        && item.size <= IMG_SPILL_MAX;
+    let mime = item.mime.clone();
+    match crate::client::send(state, client, target, vec![item]).await {
+        Ok(()) => {
+            if is_img {
+                if let Ok(bytes) = tokio::fs::read(cache_src.unwrap()).await {
+                    state.cache_image(msg_id, mime, bytes).await;
+                }
+            }
+            Ok(())
+        }
+        Err(e) => Err(format!("{e:#}")),
+    }
+}
+
+#[derive(Deserialize)]
 struct UiReveal {
     file: String,
 }
@@ -1049,6 +1282,7 @@ pub fn new_state(identity: crate::config::Identity) -> anyhow::Result<Shared> {
     Ok(Arc::new(crate::state::AppState {
         identity,
         db,
+        picker: tokio::sync::Mutex::new(crate::state::Picker::Inline),
         devices: Default::default(),
         session: Default::default(),
         received: Default::default(),

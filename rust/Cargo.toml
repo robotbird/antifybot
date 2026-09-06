@@ -40,6 +40,7 @@ socket2 = "0.6"
 # 枚举本机网络接口（多播按接口收发，覆盖虚拟机网桥）
 if-addrs = "0.13"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+rfd = "0.15"
 
 [profile.release]
 strip = true
