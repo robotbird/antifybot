@@ -8,6 +8,6 @@ description = "AntifyBot 桌面壳（Tauri v2）：内嵌 LocalSend 节点 + 面
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 antify-rs = { path = ".." }
 axum-server = "0.7"

@@ -2,8 +2,10 @@
 //! 后台启动 LocalSend 节点（多播发现 + HTTPS 收发），窗口加载本机明文面板。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::WebviewWindowBuilder;
-use tauri::WebviewUrl;
+use tauri::{Manager, WebviewUrl, WindowEvent};
 
 /// 本机面板端口：53318 起，占用则依次后挪
 const UI_PORT_BASE: u16 = 53318;
@@ -12,6 +14,15 @@ fn main() {
     antify_rs::install_crypto_provider();
 
     tauri::Builder::default()
+        .on_window_event(|window, event| {
+            // 关窗不退出：收进托盘，节点常驻继续收发；退出走托盘菜单
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             // 1) 先占住面板端口（同步，保证窗口打开时服务已就绪）
             let (ui_port, listener) = bind_ui_port(UI_PORT_BASE)
@@ -43,10 +54,70 @@ fn main() {
                 .inner_size(900.0, 680.0)
                 .min_inner_size(720.0, 540.0)
                 .build()?;
+
+            // 5) 系统托盘：左键点图标切换窗口显隐，菜单提供「显示面板 / 退出」
+            let show = MenuItem::with_id(app, "show", "显示面板", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出 AntifyBot", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            TrayIconBuilder::with_id("main-tray")
+                .icon(app.default_window_icon().cloned().ok_or("缺少应用图标")?)
+                .tooltip("AntifyBot 局域网快传")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if matches!(
+                        event,
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        }
+                    ) {
+                        toggle_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("AntifyBot 运行失败");
+        .build(tauri::generate_context!())
+        .expect("AntifyBot 运行失败")
+        .run(|app, event| {
+            // macOS：窗口收进托盘后，点 Dock 图标重新唤起
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } = event
+            {
+                if !has_visible_windows {
+                    show_main_window(app);
+                }
+            }
+        });
+}
+
+/// 唤起主窗口（显示 + 聚焦）
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+/// 托盘左键切换：窗口可见且聚焦 → 收起，否则唤起
+fn toggle_main_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        if w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false) {
+            let _ = w.hide();
+        } else {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+    }
 }
 
 fn bind_ui_port(base: u16) -> Option<(u16, std::net::TcpListener)> {
