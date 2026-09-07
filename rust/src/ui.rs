@@ -261,6 +261,11 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     padding:16px 18px;box-shadow:var(--shadow)}
   .prog .row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:13.5px}
   .prog .row b{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* 进度卡右上 ✕：取消传输（发送侧置取消标志；接收侧清会话 + 短期拒收） */
+  .prog .xbtn{flex:none;align-self:center;width:22px;height:22px;border:none;border-radius:50%;
+    background:transparent;color:var(--muted);font-size:12px;line-height:1;display:grid;
+    place-items:center;cursor:pointer;transition:.15s}
+  .prog .xbtn:hover{background:var(--err);color:#fff}
   .prog .sz{color:var(--muted);font-family:var(--mono);font-size:12px;flex:none}
   .bar{height:6px;background:var(--accent-soft);border-radius:99px;overflow:hidden;margin:10px 0 2px}
   .bar i{display:block;height:100%;background:var(--accent);border-radius:99px;transition:width .3s}
@@ -629,6 +634,9 @@ const L = {
     clipDenied:'无法读取剪贴板，可直接 ⌘/Ctrl+V 粘贴', clipImgName:'剪贴板图片',
     sentT:'已送达：{0}', sendFail:'发送失败',
     textSent:'文本已送达', retrying:'重试中…', retryFail:'重试失败',
+    bigFileHint:'{0} 较大：拖拽中转不支持断点续传，建议用「发送文件」按钮（可断点续传）',
+    cancelT:'取消传输', cancelSendT:'已请求取消发送（重试可断点续传）',
+    cancelRxT:'已取消接收（5 分钟内拒收对方重试）', cancelFail:'取消失败',
     onlineT:'上线：{0}', offlineT:'离线：{0}', receivedT:'已接收：{0}',
     removed:'已移除「{0}」，重新上线会自动出现', removeFail:'移除失败', openFail:'打开失败',
     setTitle:'设置', secGeneral:'通用', secStorage:'存储', secAbout:'关于',
@@ -673,6 +681,9 @@ const L = {
     clipDenied:"Can't read clipboard; paste with ⌘/Ctrl+V instead", clipImgName:'clipboard-image',
     sentT:'Delivered: {0}', sendFail:'Send failed',
     textSent:'Text delivered', retrying:'Retrying…', retryFail:'Retry failed',
+    bigFileHint:'{0} is large: drag-and-drop relay has no resume — prefer the "Choose files" button (resumable)',
+    cancelT:'Cancel transfer', cancelSendT:'Send cancel requested (retry resumes from checkpoint)',
+    cancelRxT:'Reception cancelled (retries declined for 5 minutes)', cancelFail:'Cancel failed',
     onlineT:'Online: {0}', offlineT:'Offline: {0}', receivedT:'Received: {0}',
     removed:'Removed "{0}"; it reappears when back online', removeFail:'Remove failed', openFail:'Open failed',
     setTitle:'Settings', secGeneral:'General', secStorage:'Storage', secAbout:'About',
@@ -877,19 +888,21 @@ function render(s){
   renderCenter(s);
   renderChat(s);
 
-  // ── 传输进行中 → 主区顶部进度卡 ──
+  // ── 传输进行中 → 主区顶部进度卡（右上 ✕ 取消） ──
   const busy = [];
   if (s.sending && s.sending.active){
     const p = s.sending, pct = p.total ? Math.min(100, p.sent/p.total*100) : 0;
     busy.push(`<div class="prog"><div class="row"><b>↑ ${esc(t('progSend', p.target_alias, p.file_name))}</b>
-      <span class="sz">${fmtSize(p.sent)} / ${fmtSize(p.total)}</span></div>
+      <span class="sz">${fmtSize(p.sent)} / ${fmtSize(p.total)}</span>
+      <button class="xbtn" title="${esc(t('cancelT'))}" aria-label="${esc(t('cancelT'))}" onclick="cancelSend()">✕</button></div>
       <div class="bar"><i style="width:${pct}%"></i></div></div>`);
   }
   if (s.session && s.session.active){
     const c = s.session.current || {};
     const pct = c.total ? Math.min(100, (c.got||0)/c.total*100) : 0;
     busy.push(`<div class="prog"><div class="row"><b>↓ ${esc(t('progRecv', s.session.sender, c.name||''))}</b>
-      <span class="sz">${fmtSize(c.got)} / ${fmtSize(c.total)}</span></div>
+      <span class="sz">${fmtSize(c.got)} / ${fmtSize(c.total)}</span>
+      <button class="xbtn" title="${esc(t('cancelT'))}" aria-label="${esc(t('cancelT'))}" onclick="cancelRx()">✕</button></div>
       <div class="bar"><i style="width:${pct}%"></i></div>
       <ul class="files">${(s.session.files||[]).map(f =>
         `<li class="${f.done?'ok':''}"><span class="tick">${f.done?'✔':'○'}</span>${esc(f.name)}
@@ -1082,6 +1095,10 @@ async function poll(){
 // ── 发送 ──
 async function sendFiles(fp, files){
   sel = fp; syncSel(); // 发送即切到目标会话（进度卡在会话流顶部可见）
+  // 浏览器流式中转不可 seek、无断点续传：大文件只提示（不阻断），引导走原生选择器
+  const BIG = 512 * 1024 * 1024;
+  const big = files.filter(f => f.size > BIG).sort((a,b) => b.size - a.size)[0];
+  if (big) toast(t('bigFileHint', big.name), true);
   for (const f of files){
     try{
       const q = `target=${encodeURIComponent(fp)}&name=${encodeURIComponent(f.name)}`+
@@ -1092,6 +1109,22 @@ async function sendFiles(fp, files){
       else { toast(v.error || t('sendFail'), true); break; }
     }catch(e){ toast(t('sendFail')+'：'+e.message, true); break; }
   }
+}
+
+// ── 取消传输（进度卡 ✕）：发送侧置标志由发送循环感知；接收侧清会话 + 短期拒收 ──
+async function cancelSend(){
+  try{
+    const r = await fetch('/api/ui/cancel-send', {method:'POST'});
+    if (r.ok) toast(t('cancelSendT'));
+    else { const v = await r.json().catch(()=>({})); toast(v.error || t('cancelFail'), true); }
+  }catch(_){ toast(t('cancelFail'), true); }
+}
+async function cancelRx(){
+  try{
+    const r = await fetch('/api/ui/cancel-rx', {method:'POST'});
+    if (r.ok) toast(t('cancelRxT'));
+    else { const v = await r.json().catch(()=>({})); toast(v.error || t('cancelFail'), true); }
+  }catch(_){ toast(t('cancelFail'), true); }
 }
 
 function pickThenFile(fp){ pendingTarget = fp; $('filepick').value = ''; $('filepick').click(); }

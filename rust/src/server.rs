@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 /// 协议 router：LocalSend v2 端点（官方 App 兼容）。
 /// 绑 0.0.0.0 对局域网开放 —— 绝不能混入面板 API（任意路径发送/移除设备等只许本机调用）。
@@ -26,6 +26,8 @@ pub fn build_protocol_router(state: Shared) -> Router {
         .route("/api/localsend/v2/upload", post(upload))
         .route("/api/localsend/v2/cancel", post(cancel))
         .route("/api/localsend/v2/cancel-upload", post(cancel)) // 旧草案别名
+        // AntifyBot 私有扩展（官方 App 不会调用；老版本对端 404 → 发送端回退单发）
+        .route("/api/antify/v1/resume-info", get(resume_info))
         .with_state(state)
 }
 
@@ -46,6 +48,8 @@ pub fn build_panel_router(state: Shared) -> Router {
         .route("/api/ui/set-dir", post(ui_set_dir))
         .route("/api/ui/check-update", post(ui_check_update))
         .route("/api/ui/open-url", post(ui_open_url))
+        .route("/api/ui/cancel-send", post(ui_cancel_send))
+        .route("/api/ui/cancel-rx", post(ui_cancel_rx))
         .with_state(state)
 }
 
@@ -101,6 +105,16 @@ pub async fn serve(state: Shared) -> anyhow::Result<()> {
                         st.log_event(format!("「{alias}」的会话 60 秒无活动，自动回收")).await;
                     }
                 }
+            }
+        });
+    }
+    // 暂存清扫：启动一次 + 每 24h；活跃传输的 meta.updated_at 恒新，按龄清扫安全
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            loop {
+                crate::resume::sweep_orphans(&st, std::time::Duration::from_secs(7 * 24 * 3600)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
             }
         });
     }
@@ -202,6 +216,13 @@ async fn prepare_upload(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> Response {
+    // 本端用户取消接收后的拒收窗口：按官方语义回 204（我方发送端据此终止不重试）
+    if state.is_declined(&peer.ip()).await {
+        state
+            .log_event(format!("已拒收「{}」的传输请求（本端取消了接收）", peer.ip()))
+            .await;
+        return StatusCode::NO_CONTENT.into_response();
+    }
     let info = body.get("info").cloned().unwrap_or(json!({}));
     let sender_alias = info
         .get("alias")
@@ -246,6 +267,8 @@ async fn prepare_upload(
                     .to_string(),
                 done: false,
                 attempts: 0,
+                received: 0,
+                mismatch_streak: 0,
             },
         );
     }
@@ -300,16 +323,20 @@ struct UploadQuery {
     #[serde(rename = "fileId")]
     file_id: String,
     token: String,
+    /// AntifyBot 分块扩展：本块在文件中的起始偏移。缺省 = 官方单发语义
+    offset: Option<u64>,
+    /// 分块扩展：本块字节数（与 offset 必须成对出现）
+    len: Option<u64>,
 }
 
 async fn upload(
     State(state): State<Shared>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Query(q): Query<UploadQuery>,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     req: Request,
 ) -> Response {
-    // 会话与令牌校验
+    // 会话与令牌校验（单发/分块共用）
     let (file_name, size, sha_expect, mime, preview) = {
         let mut slot = state.session.lock().await;
         let Some(session) = slot.as_mut() else {
@@ -324,7 +351,10 @@ async fn upload(
         if file.token != q.token || file.done {
             return err_json(StatusCode::FORBIDDEN, "Invalid token or IP address");
         }
-        file.attempts += 1;
+        // attempts 只计单发整文件次数；分块每块一请求，重试语义在块内
+        if q.offset.is_none() {
+            file.attempts += 1;
+        }
         (
             file.file_name.clone(),
             file.size,
@@ -334,13 +364,37 @@ async fn upload(
         )
     };
     {
-        // 会话续命：一次上传（含重试）都算活动
+        // 会话续命：一次上传（含重试/分块）都算活动
         let mut slot = state.session.lock().await;
         if let Some(s) = slot.as_mut() {
             s.last_active = tokio::time::Instant::now();
         }
     }
 
+    match (q.offset, q.len) {
+        (None, None) => {
+            upload_whole(state, peer, q, file_name, size, sha_expect, mime, preview, req).await
+        }
+        (Some(offset), Some(len)) => {
+            upload_chunk(state, peer, q, headers, file_name, size, sha_expect, mime, preview, offset, len, req).await
+        }
+        _ => err_json(StatusCode::BAD_REQUEST, "offset 与 len 必须成对出现"),
+    }
+}
+
+/// 官方单发路径：整个文件一次性 POST（官方 LocalSend App / 老版本对端）
+#[allow(clippy::too_many_arguments)]
+async fn upload_whole(
+    state: Shared,
+    peer: SocketAddr,
+    q: UploadQuery,
+    file_name: String,
+    size: u64,
+    sha_expect: Option<String>,
+    mime: String,
+    preview: String,
+    req: Request,
+) -> Response {
     *state.rx_name.lock().await = file_name.clone();
     state.rx_total.store(size, Ordering::Relaxed);
     state.rx_bytes.store(0, Ordering::Relaxed);
@@ -408,12 +462,241 @@ async fn upload(
         return err_json(StatusCode::UNPROCESSABLE_ENTITY, "Checksum mismatch");
     }
 
+    finalize(
+        &state,
+        &peer,
+        &q.file_id,
+        &part_path,
+        None,
+        &file_name,
+        got,
+        &mime,
+        &preview,
+    )
+    .await
+}
+
+/// AntifyBot 分块扩展：每块一个请求（offset/len 查询参数 + X-Chunk-SHA256 头），
+/// 落进内容寻址暂存目录；断线后发送端重新 prepare + resume-info 即可续传
+#[allow(clippy::too_many_arguments)]
+async fn upload_chunk(
+    state: Shared,
+    peer: SocketAddr,
+    q: UploadQuery,
+    headers: HeaderMap,
+    file_name: String,
+    size: u64,
+    sha_expect: Option<String>,
+    mime: String,
+    preview: String,
+    offset: u64,
+    len: u64,
+    req: Request,
+) -> Response {
+    // 分块强依赖 sha256（暂存目录按内容寻址）与块 hash
+    let Some(sha) = sha_expect.filter(|s| !s.is_empty()).map(|s| s.to_ascii_lowercase()) else {
+        return err_json(StatusCode::BAD_REQUEST, "分块上传要求 prepare 载荷携带 sha256");
+    };
+    let Some(chunk_sha) = headers
+        .get("x-chunk-sha256")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+    else {
+        return err_json(StatusCode::BAD_REQUEST, "缺少 X-Chunk-SHA256 头");
+    };
+    if offset > size || len > size - offset {
+        return err_json(StatusCode::BAD_REQUEST, "offset/len 越界");
+    }
+
+    let dl = state.download_dir.read().await.clone();
+    let dir = crate::resume::transfer_dir(&dl, &sha, size);
+    let fallback = crate::resume::PartMeta {
+        version: crate::resume::META_VERSION,
+        file_name: file_name.clone(),
+        size,
+        sha256: sha.clone(),
+        received: 0,
+        updated_at: now_ms(),
+    };
+
+    // 写入段互斥：与并发到达的重复块 / resume-info 的顺手收尾串行化
+    let _guard = state.rx_write.lock().await;
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("暂存目录创建失败: {e}"));
+    }
+    let mut meta = match crate::resume::reconcile(&dir, &fallback).await {
+        Ok(m) => m,
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("暂存区自愈失败: {e}")),
+    };
+    if offset > meta.received {
+        // 对端与暂存失步（上一块实际没写成）：告知当前进度让其重对齐
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "offset ahead of received", "offset": meta.received })),
+        )
+            .into_response();
+    }
+    if offset < meta.received {
+        // 幂等重写：重复块/重试乱序 → 回退到 offset 再写
+        let trunc = match tokio::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(dir.join(crate::resume::DATA_FILE))
+            .await
+        {
+            Ok(f) => f.set_len(offset).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = trunc {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("暂存截断失败: {e}"));
+        }
+        meta.received = offset;
+        meta.updated_at = now_ms();
+        if let Err(e) = crate::resume::write_meta_atomic(&dir, &meta) {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("meta 写入失败: {e}"));
+        }
+    }
+
+    // 进度：从已收字节起算，不清零（面板进度卡跨块连续）
+    *state.rx_name.lock().await = file_name.clone();
+    state.rx_total.store(size, Ordering::Relaxed);
+    state.rx_bytes.store(offset, Ordering::Relaxed);
+    {
+        let mut slot = state.session.lock().await;
+        if let Some(s) = slot.as_mut() {
+            if let Some(f) = s.files.get_mut(&q.file_id) {
+                f.received = offset;
+            }
+        }
+    }
+
+    let data_path = dir.join(crate::resume::DATA_FILE);
+    let mut out = match tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&data_path)
+        .await
+    {
+        Ok(f) => f,
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("打开暂存失败: {e}")),
+    };
+    if let Err(e) = out.seek(tokio::io::SeekFrom::Start(offset)).await {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("暂存定位失败: {e}"));
+    }
+
+    let mut stream = req.into_body().into_data_stream();
+    let mut hasher = Sha256::new();
+    let mut got: u64 = 0;
+    let mut failure: Option<(StatusCode, String)> = None;
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                got += bytes.len() as u64;
+                if got > len {
+                    failure = Some((StatusCode::UNPROCESSABLE_ENTITY, "块超出声明长度".into()));
+                    break;
+                }
+                hasher.update(&bytes);
+                state.rx_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                if out.write_all(&bytes).await.is_err() {
+                    failure = Some((StatusCode::INSUFFICIENT_STORAGE, "写盘失败".into()));
+                    break;
+                }
+            }
+            Err(e) => {
+                failure = Some((StatusCode::UNPROCESSABLE_ENTITY, format!("接收中断: {e}")));
+                break;
+            }
+        }
+    }
+    let _ = out.flush().await;
+
+    if failure.is_none() && got != len {
+        failure = Some((StatusCode::UNPROCESSABLE_ENTITY, format!("块不完整（{got}/{len} 字节）")));
+    }
+    if failure.is_none() && !chunk_sha.eq_ignore_ascii_case(&hex::encode(hasher.finalize())) {
+        failure = Some((StatusCode::UNPROCESSABLE_ENTITY, "块 SHA-256 不一致".into()));
+        // 连续坏块：≥3 视为不可恢复，置 done 终止（防发送端死循环重试）
+        let mut slot = state.session.lock().await;
+        if let Some(s) = slot.as_mut() {
+            if let Some(f) = s.files.get_mut(&q.file_id) {
+                f.mismatch_streak += 1;
+                if f.mismatch_streak >= 3 {
+                    f.done = true;
+                }
+            }
+        }
+    }
+    if let Some((code, msg)) = failure {
+        // 截回已验证长度，暂存保持一致（received 未推进）
+        let _ = out.set_len(meta.received).await;
+        state
+            .log_event(format!("接收 {} 字节 {offset}..{} 块失败：{msg}", file_name, offset + got))
+            .await;
+        return err_json(code, &msg);
+    }
+
+    // 持久化顺序：先 fsync data，再原子写 meta —— received 只指向已落盘数据
+    if let Err(e) = out.sync_all().await {
+        let _ = out.set_len(meta.received).await;
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("fsync 失败: {e}"));
+    }
+    drop(out);
+    meta.received = offset + len;
+    meta.updated_at = now_ms();
+    if let Err(e) = crate::resume::write_meta_atomic(&dir, &meta) {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("meta 写入失败: {e}"));
+    }
+    {
+        let mut slot = state.session.lock().await;
+        if let Some(s) = slot.as_mut() {
+            if let Some(f) = s.files.get_mut(&q.file_id) {
+                f.received = meta.received;
+                f.mismatch_streak = 0;
+            }
+        }
+    }
+
+    if meta.received == size {
+        return finalize(
+            &state,
+            &peer,
+            &q.file_id,
+            &data_path,
+            Some(&dir),
+            &file_name,
+            size,
+            &mime,
+            &preview,
+        )
+        .await;
+    }
+    StatusCode::OK.into_response()
+}
+
+/// 传输完成的统一收尾：文字消息判定 →（真文件）落盘 → 会话流归因 → 会话标记。
+/// `data` 是写完的完整数据文件（单发的 .part / 分块暂存的 data）；
+/// `staging_dir` 为分块暂存目录（单发传 None，收尾后整体删除）。
+/// 落盘失败**保留数据文件**并返回 500——绝不删除已收数据
+#[allow(clippy::too_many_arguments)]
+async fn finalize(
+    state: &Shared,
+    peer: &SocketAddr,
+    file_id: &str,
+    data: &std::path::Path,
+    staging_dir: Option<&std::path::Path>,
+    file_name: &str,
+    got: u64,
+    mime: &str,
+    preview: &str,
+) -> Response {
     // 文字消息识别：官方 LocalSend 的「发送文本」= text/plain 小文件，命名 <uuid>.txt，
     // 并把正文嵌进 FileDto.preview（消息与文件混发时 preview 缺席，以 uuid.txt 命名兜底）。
     // 普通文件名的 .md/.txt/.csv… 一律是真文件，照常落盘为文件卡片，
     // 不能把文档正文当聊天内容渲染。
     const TEXT_MSG_MAX: u64 = 64 * 1024;
-    let stem = std::path::Path::new(&file_name)
+    let stem = std::path::Path::new(file_name)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("");
@@ -423,7 +706,7 @@ async fn upload(
         && got <= TEXT_MSG_MAX
         && (!preview.is_empty() || uuid_named);
     let as_text: Option<String> = if is_message {
-        tokio::fs::read(&part_path)
+        tokio::fs::read(data)
             .await
             .ok()
             .and_then(|b| {
@@ -435,17 +718,31 @@ async fn upload(
     };
 
     let file_name_final = if as_text.is_some() {
-        let _ = tokio::fs::remove_file(&part_path).await;
+        let _ = tokio::fs::remove_file(data).await;
+        if let Some(d) = staging_dir {
+            let _ = tokio::fs::remove_dir_all(d).await;
+        }
         String::new()
     } else {
-        if tokio::fs::rename(&part_path, &final_path).await.is_err() {
-            let _ = tokio::fs::remove_file(&part_path).await;
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "落盘失败");
+        // 目标名收尾时才解析；rename 失败（目标名被并发占用 / Windows 不可覆盖已存在）
+        // → 换名重试一次，仍失败保留数据（分块暂存还在，重试 probe 会再次走到这里）
+        let mut target = state.resolve_path(file_name).await;
+        if tokio::fs::rename(data, &target).await.is_err() {
+            target = state.resolve_path(file_name).await;
+            if tokio::fs::rename(data, &target).await.is_err() {
+                state
+                    .log_event(format!("落盘 {file_name} 失败（数据已保留，可重试续传）"))
+                    .await;
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, "落盘失败（数据已保留）");
+            }
         }
-        final_path
+        if let Some(d) = staging_dir {
+            let _ = tokio::fs::remove_dir_all(d).await;
+        }
+        target
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| file_name.clone())
+            .unwrap_or_else(|| file_name.to_string())
     };
     // 会话流归因：优先 prepare 时记下的发送方指纹（同机测试/NAT 下 IP 对不上），
     // 缺失再按来源 IP 反查设备表，仍查不到用 IP 字符串占位（气泡不丢）
@@ -512,10 +809,10 @@ async fn upload(
     }
 
     // 标记完成；全部完成则会话结束
-    let all_done = {
+    {
         let mut slot = state.session.lock().await;
         let done = slot.as_mut().map(|s| {
-            if let Some(f) = s.files.get_mut(&q.file_id) {
+            if let Some(f) = s.files.get_mut(file_id) {
                 f.done = true;
             }
             s.files.values().all(|f| f.done)
@@ -525,25 +822,113 @@ async fn upload(
             drop(slot);
             state.log_event(format!("「{}」的传输会话完成", sender)).await;
             *state.session.lock().await = None;
-            true
-        } else {
-            false
         }
-    };
-    let _ = all_done;
+    }
 
     StatusCode::OK.into_response()
 }
 
 #[derive(Deserialize)]
-struct CancelQuery {
+struct ResumeQuery {
     #[serde(rename = "sessionId")]
-    _session_id: Option<String>,
+    session_id: String,
+    #[serde(rename = "fileId")]
+    file_id: String,
+    token: String,
 }
 
-async fn cancel(State(state): State<Shared>, Query(_q): Query<CancelQuery>) -> Response {
-    let had = state.session.lock().await.take().is_some();
+/// AntifyBot 扩展：查询某文件已收到的字节数，发送端据此从 offset 续传。
+/// 鉴权同 upload（sessionId + token + 来源 IP）；若暂存已收满但上次没走到收尾
+/// （进程崩溃/会话被回收），顺手补一次收尾——幂等且是 resume 的自然终点
+async fn resume_info(
+    State(state): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(q): Query<ResumeQuery>,
+) -> Response {
+    let (file_name, size, sha, mime, preview) = {
+        let mut slot = state.session.lock().await;
+        let Some(session) = slot.as_mut() else {
+            return err_json(StatusCode::FORBIDDEN, "Invalid token or IP address");
+        };
+        if session.id != q.session_id || session.sender_ip != peer.ip() {
+            return err_json(StatusCode::FORBIDDEN, "Invalid token or IP address");
+        }
+        session.last_active = tokio::time::Instant::now();
+        let Some(file) = session.files.get_mut(&q.file_id) else {
+            return err_json(StatusCode::FORBIDDEN, "Invalid token or IP address");
+        };
+        if file.token != q.token {
+            return err_json(StatusCode::FORBIDDEN, "Invalid token or IP address");
+        }
+        (
+            file.file_name.clone(),
+            file.size,
+            file.sha256.clone(),
+            file.mime.clone(),
+            file.preview.clone(),
+        )
+    };
+    let Some(sha) = sha.filter(|s| !s.is_empty()).map(|s| s.to_ascii_lowercase()) else {
+        // 发送端没给 sha256（如官方 App）——无从续传，从 0 开始
+        return Json(json!({ "offset": 0, "size": size, "sha256": "" })).into_response();
+    };
+    let dl = state.download_dir.read().await.clone();
+    let dir = crate::resume::transfer_dir(&dl, &sha, size);
+    let _guard = state.rx_write.lock().await; // 与块写入/收尾串行化
+    let fallback = crate::resume::PartMeta {
+        version: crate::resume::META_VERSION,
+        file_name: file_name.clone(),
+        size,
+        sha256: sha.clone(),
+        received: 0,
+        updated_at: now_ms(),
+    };
+    let meta = match crate::resume::reconcile(&dir, &fallback).await {
+        Ok(m) => m,
+        // 自愈失败（磁盘异常）：宁可让发送端从 0 重传
+        Err(_) => return Json(json!({ "offset": 0, "size": size, "sha256": sha })).into_response(),
+    };
+    if size > 0 && meta.received == size {
+        let data_path = dir.join(crate::resume::DATA_FILE);
+        let resp = finalize(
+            &state,
+            &peer,
+            &q.file_id,
+            &data_path,
+            Some(&dir),
+            &file_name,
+            size,
+            &mime,
+            &preview,
+        )
+        .await;
+        if !resp.status().is_success() {
+            return resp;
+        }
+        return Json(json!({ "offset": size, "size": size, "sha256": sha })).into_response();
+    }
+    Json(json!({ "offset": meta.received, "size": size, "sha256": sha })).into_response()
+}
+
+#[derive(Deserialize)]
+struct CancelQuery {
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+}
+
+async fn cancel(State(state): State<Shared>, Query(q): Query<CancelQuery>) -> Response {
+    // 携带 sessionId 且与当前会话不符 → no-op：发送端轮次重试前清理自己上一轮的
+    // 僵尸会话用，绝不误杀别人的活跃会话（官方 App 的 cancel 携带匹配的 id；
+    // 不带 id 的老草案客户端仍按原语义取消当前会话）
+    let had = {
+        let slot = state.session.lock().await;
+        match q.session_id.as_deref() {
+            Some(id) => slot.as_ref().map(|s| s.id == id).unwrap_or(false),
+            None => slot.is_some(),
+        }
+    };
     if had {
+        state.session.lock().await.take();
         state.log_event("对方取消了传输会话").await;
     }
     StatusCode::OK.into_response()
@@ -617,7 +1002,7 @@ async fn ui_state(State(state): State<Shared>) -> Response {
                     "total": state.rx_total.load(Ordering::Relaxed),
                 },
                 "files": s.files.values().map(|f| json!({
-                    "name": f.file_name, "size": f.size, "done": f.done,
+                    "name": f.file_name, "size": f.size, "done": f.done, "got": f.received,
                 })).collect::<Vec<_>>(),
             }),
             None => json!({"active": false}),
@@ -673,6 +1058,8 @@ async fn ui_send(
     let Some(target) = state.devices.lock().await.get(&q.target).cloned() else {
         return err_json(StatusCode::NOT_FOUND, "目标设备不存在（可能已下线）");
     };
+    // 新传输开始：清掉上一轮的取消标志
+    state.send_cancel.store(false, Ordering::Relaxed);
     let client = http_client();
 
     let name = q.name.unwrap_or_else(|| "file.bin".to_string());
@@ -781,6 +1168,13 @@ async fn ui_send(
         .into_body()
         .into_data_stream()
         .map(move |chunk| {
+            // 用户点了「取消发送」→ 让流报错，中断中转（对端会看到请求体截断）
+            if counter_state.send_cancel.load(Ordering::Relaxed) {
+                return Err(axum::Error::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "发送已取消",
+                )));
+            }
             if let Ok(ref b) = chunk {
                 counter_state
                     .relay_bytes
@@ -843,6 +1237,7 @@ async fn ui_send_text(State(state): State<Shared>, axum::Json(body): axum::Json<
     let Some(target) = state.devices.lock().await.get(&body.target).cloned() else {
         return err_json(StatusCode::NOT_FOUND, "目标设备不存在");
     };
+    state.send_cancel.store(false, Ordering::Relaxed);
     // 先落 sending 消息（⏳ 立即可见），失败置 ⚠（会话流留痕，无需回填输入框）
     let msg_id = state
         .push_chat(crate::state::ChatMsg {
@@ -874,6 +1269,37 @@ struct UiAdd {
     ip: String,
     #[serde(default = "default_port")]
     port: u16,
+}
+
+/// 取消出站传输：置取消标志，client::send 的轮次/块循环感知后自行终止。
+/// 消息状态由发送循环退出时统一落 fail（重试 = 断点续传）
+async fn ui_cancel_send(State(state): State<Shared>) -> Response {
+    state.send_cancel.store(true, Ordering::Relaxed);
+    state.log_event("已请求取消发送（暂存保留，重试可断点续传）").await;
+    Json(json!({ "ok": true })).into_response()
+}
+
+/// 取消入站传输：清会话 + 对发送端开 5 分钟拒收窗口（其自动轮次重试会收到 204
+/// 而终止）；暂存保留——对方窗口过后重发仍可从断点续传
+async fn ui_cancel_rx(State(state): State<Shared>) -> Response {
+    let sender = {
+        let mut slot = state.session.lock().await;
+        slot.take().map(|s| (s.sender_alias.clone(), s.sender_ip))
+    };
+    let Some((alias, ip)) = sender else {
+        return err_json(StatusCode::NOT_FOUND, "没有进行中的接收会话");
+    };
+    state
+        .declined
+        .lock()
+        .await
+        .insert(ip, std::time::Instant::now() + std::time::Duration::from_secs(300));
+    state
+        .log_event(format!(
+            "已取消接收「{alias}」的传输（5 分钟内拒收其重试；暂存保留，可续传）"
+        ))
+        .await;
+    Json(json!({ "ok": true })).into_response()
 }
 
 /// 手动添加设备：GET 对方 /info 拿指纹与别名
@@ -1017,6 +1443,8 @@ async fn ui_send_path(State(state): State<Shared>, axum::Json(body): axum::Json<
     let Some(target) = state.devices.lock().await.get(&body.target).cloned() else {
         return err_json(StatusCode::NOT_FOUND, "目标设备不存在（可能已被移除）");
     };
+    // 新批次开始：清掉上一轮的取消标志（批内取消会拦住后续文件）
+    state.send_cancel.store(false, Ordering::Relaxed);
     let root = std::path::PathBuf::from(&body.path);
     let files = match collect_files(&root) {
         Ok(f) if f.is_empty() => return err_json(StatusCode::BAD_REQUEST, "没有可发送的文件"),
@@ -1031,6 +1459,11 @@ async fn ui_send_path(State(state): State<Shared>, axum::Json(body): axum::Json<
     let mut ids = Vec::new();
     let mut first_err: Option<String> = None;
     for f in files {
+        // 批内取消（面板「取消发送」）：当前文件已在 client::send 里被拦下，
+        // 剩余文件不再发起（无气泡，不加 ⚠）
+        if state.send_cancel.load(Ordering::Relaxed) {
+            break;
+        }
         // 先建 item（含 SHA-256 与真实 size）再落气泡
         let item = match crate::client::item_from_path(f.clone()).await {
             Ok(i) => i,
@@ -1321,6 +1754,9 @@ pub fn new_state(identity: crate::config::Identity) -> anyhow::Result<Shared> {
         rx_bytes: Default::default(),
         rx_total: Default::default(),
         rx_name: Default::default(),
+        rx_write: Default::default(),
+        send_cancel: std::sync::atomic::AtomicBool::new(false),
+        declined: Default::default(),
     }))
 }
 

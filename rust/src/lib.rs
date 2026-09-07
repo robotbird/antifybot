@@ -3,6 +3,7 @@ pub mod client;
 pub mod config;
 pub mod db;
 pub mod discovery;
+pub mod resume;
 pub mod server;
 pub mod state;
 pub mod ui;

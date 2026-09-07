@@ -53,7 +53,12 @@ pub struct IncomingFile {
     /// v2 FileDto.preview：官方客户端发文字消息时内嵌正文（区别于普通 .txt 文件）
     pub preview: String,
     pub done: bool,
+    /// 整文件单发路径的重试计数（分块路径不递增——每块一个请求会把 3 次上限打爆）
     pub attempts: u8,
+    /// 分块路径：暂存区里已验证的字节数（进度展示 + resume-info 数据源）
+    pub received: u64,
+    /// 分块路径：连续块 hash 不符计数（≥3 视为链路/源损坏，置 done 防死循环）
+    pub mismatch_streak: u8,
 }
 
 /// 活动接收会话（协议约束：同时仅一个）
@@ -157,6 +162,15 @@ pub struct AppState {
     pub rx_bytes: AtomicU64,
     pub rx_total: AtomicU64,
     pub rx_name: Mutex<String>,
+    /// 分块写入段互斥：发送端超时重试的两请求并发到达时串行化，
+    /// 配合「offset 失衡 → 截断重写」幂等规则收敛
+    pub rx_write: Mutex<()>,
+    /// 出站传输取消标志（面板「取消」按钮置位；client::send 的块/轮循环检查）
+    pub send_cancel: std::sync::atomic::AtomicBool,
+    /// 接收侧取消后的拒收窗口：发送端 IP → 拒收截止时刻。
+    /// 窗口内 prepare-upload 一律 204（官方协议的「拒收」语义，
+    /// 我方发送端据此终止不重试），否则自动接受会让取消形同虚设
+    pub declined: Mutex<HashMap<IpAddr, std::time::Instant>>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -207,6 +221,14 @@ impl AppState {
             self.log_event(format!("{n} 条上次未完成的消息已标记未送达（可点击重试）")).await;
         }
         self.db.prune();
+    }
+
+    /// 拒收窗口是否命中（顺手清掉已过期的条目）
+    pub async fn is_declined(&self, ip: &IpAddr) -> bool {
+        let mut d = self.declined.lock().await;
+        let now = std::time::Instant::now();
+        d.retain(|_, until| *until > now);
+        d.contains_key(ip)
     }
 
     pub async fn log_event(&self, text: impl Into<String>) {
