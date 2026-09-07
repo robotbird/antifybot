@@ -21,14 +21,14 @@ pub const DASHBOARD: &str = r##"<!doctype html>
 <style>
   /* ── 主题变量：默认浅色；显式深色 data-theme="dark"；系统深色但未锁定浅色时同样取深色 ── */
   :root{
-    --bg:#faf9f7; --card:#ffffff; --ink:#1d1d1f; --muted:#86868b;
+    --bg:#f7f7f8; --card:#ffffff; --ink:#202124; --muted:#74777d;
     --line:rgba(0,0,0,.08); --line-strong:rgba(0,0,0,.13);
-    --accent:#d98324; --accent-deep:#b06a15;
-    --accent-soft:rgba(217,131,36,.10); --ok:#34a853; --err:#e5484d;
+    --accent:#3979e8; --accent-deep:#2466cf;
+    --accent-soft:rgba(57,121,232,.11); --ok:#34a853; --err:#d84b52;
     /* 侧栏：ChatGPT 式浅暖灰，比主区深半档 */
-    --side:#ececea; --side-ink:#1d1d1f; --side-muted:#86868b;
+    --side:#f0f0f1; --side-ink:#24262a; --side-muted:#777a80;
     --side-line:rgba(0,0,0,.08); --side-hover:rgba(0,0,0,.045);
-    --side-sel:rgba(0,0,0,.075);
+    --side-sel:rgba(0,0,0,.085);
     /* 会话区（ChatGPT 式）：纯白消息区、灰底出站气泡、白底输入盒 */
     --chat-bg:#ffffff; --bub-out:#f0f0f0; --comp:#ffffff;
     --soft:rgba(0,0,0,.055); --soft-hover:rgba(0,0,0,.10);
@@ -68,14 +68,45 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
     line-height:1.5;overflow:hidden;-webkit-font-smoothing:antialiased;
     transition:background .3s,color .3s}
-  .app{display:flex;height:100%}
+  /* App shell: a restrained desktop chrome above a persistent two-column workspace. */
+  .app{display:grid;grid-template-rows:44px minmax(0,1fr);height:100%;min-height:0}
+  .appchrome{display:grid;grid-template-columns:248px minmax(0,1fr);user-select:none;
+    transition:grid-template-columns .26s cubic-bezier(.2,.8,.2,1)}
+  .chrome-side,.chrome-main{display:flex;align-items:center;min-width:0}
+  .chrome-side{padding:0 14px;gap:10px;background:var(--side);border-right:1px solid var(--side-line)}
+  .sidebar-toggle{width:28px;height:28px;border:0;border-radius:8px;background:transparent;color:var(--side-muted);
+    display:grid;place-items:center;cursor:pointer;transition:background .15s,color .15s}
+  .sidebar-toggle:hover{background:var(--side-hover);color:var(--side-ink)}
+  .sidebar-toggle:active{transform:scale(.96)}
+  .sidebar-toggle i{position:relative;display:block;width:16px;height:15px;border:1.5px solid currentColor;border-radius:4px}
+  .sidebar-toggle i::after{content:"";position:absolute;top:1px;bottom:1px;left:4px;border-left:1.5px solid currentColor}
+  .chrome-main{justify-content:space-between;padding:0 20px 0 28px;gap:16px;background:var(--chat-bg)}
+  .crumbs{display:flex;align-items:center;gap:8px;min-width:0;color:var(--muted);font-size:12.5px}
+  .crumbs b{color:var(--ink);font-weight:680;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chrome-context{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crumb-sep{color:var(--side-muted);font-size:16px;font-weight:300}
+  .chrome-status{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:11.5px;white-space:nowrap}
+  .live-dot{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(52,168,83,.11)}
+  .workspace{display:flex;min-height:0}
+  /* Tauri on macOS overlays the native traffic lights onto this toolbar. */
+  .is-macos .chrome-side{padding-left:76px}
+  .is-macos .sidebar-toggle{margin-top:-12px}
+  html.sidebar-collapsed .appchrome{grid-template-columns:64px minmax(0,1fr)}
+  /* 收起后主区全宽，侧栏内容轻微淡出并滑离，不留可点击区域。 */
+  html.sidebar-collapsed .side{width:0;opacity:0;pointer-events:none}
+  html.sidebar-collapsed .side > *{opacity:0;transform:translateX(-10px)}
+  html.sidebar-collapsed .chrome-side{background:var(--chat-bg);border-right:none}
+  /* macOS 的交通灯占据左上安全区；收起态仍需容纳其后的切换按钮。 */
+  html.sidebar-collapsed.is-macos .appchrome{grid-template-columns:120px minmax(0,1fr)}
+  @media(prefers-reduced-motion:reduce){.appchrome,.side,.side > *{transition:none}}
 
   /* ── 左侧栏（ChatGPT 式） ── */
-  .side{width:248px;flex:none;background:var(--side);color:var(--side-ink);
-    display:flex;flex-direction:column}
-  .brand{display:flex;align-items:center;gap:8px;padding:15px 14px 10px;
-    font-weight:700;font-size:15px;letter-spacing:-.01em}
-  .brand .bico{font-size:18px;line-height:1}
+  .side{width:248px;flex:none;overflow:hidden;background:var(--side);color:var(--side-ink);
+    display:flex;flex-direction:column;transition:width .26s cubic-bezier(.2,.8,.2,1),opacity .16s ease}
+  .side > *{transition:opacity .14s ease,transform .22s cubic-bezier(.2,.8,.2,1)}
+  .brand{display:flex;align-items:center;gap:8px;padding:17px 16px 12px;
+    font-weight:700;font-size:19px;letter-spacing:-.025em;color:var(--side-ink)}
+  .brand .bico{font-size:13px;line-height:1;color:var(--side-muted);transform:translateY(1px)}
   .side-scroll{flex:1;overflow-y:auto;padding:4px 10px 10px}
   .label{display:flex;align-items:center;gap:6px;padding:10px 8px 6px;
     font-size:11.5px;font-weight:600;color:var(--side-muted);letter-spacing:.08em}
@@ -111,26 +142,26 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     color:var(--side-muted);border:1.5px dashed var(--side-line);border-radius:12px}
   .devempty small{font-size:11px;opacity:.8}
   /* 左下角设置入口：普通图标 + 文字行（ChatGPT 式用户位） */
-  .sidefoot{flex:none;padding:8px 10px 10px;border-top:1px solid var(--side-line)}
+  .sidefoot{flex:none;padding:8px 10px 10px}
   .setrow{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;
-    border:none;border-radius:10px;background:transparent;color:var(--side-ink);
+    border:none;border-radius:10px;background:transparent;color:var(--side-muted);
     font-family:var(--sans);font-size:13.5px;font-weight:600;cursor:pointer;
     transition:background .15s}
   .setrow:hover{background:var(--side-hover)}
-  .setrow .sic{font-size:15px;line-height:1;flex:none}
+  .setrow .sic{font-size:1em;line-height:1;flex:none}
   .setrow .smid{flex:1;text-align:left;min-width:0;overflow:hidden;
     text-overflow:ellipsis;white-space:nowrap}
-  .setrow .schev{color:var(--side-muted);font-size:13px;line-height:1}
+  .setrow .schev{color:inherit;font-size:13px;line-height:1}
 
   /* ── 主区 ── */
-  .main{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0}
+  .main{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;background:var(--chat-bg)}
 
   /* 会话视图（选中设备后）：头部 + 气泡流 + 底部聊天输入条 */
   #chatview{flex:1;min-height:0;display:flex;flex-direction:column;background:var(--chat-bg)}
   #chatview[hidden]{display:none}
   /* 头部横带取侧栏同色，与左侧连成 L 形，和消息区拉开层次 */
-  .chead{flex:none;padding:13px 26px;border-bottom:1px solid var(--line-strong);
-    background:var(--side);display:flex;align-items:baseline;gap:10px}
+  /* Selected-device context lives in the app chrome, leaving the conversation uninterrupted. */
+  .chead{display:none}
   .chead h2{margin:0;font-size:16px;font-weight:700;letter-spacing:-.01em;
     max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .chead .cmeta{font-size:12px;color:var(--muted);min-width:0;
@@ -160,8 +191,14 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .fchip .fnm{font-weight:600;font-size:13.5px;max-width:240px;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .fchip .fsz{font-size:11px;opacity:.75;font-family:var(--mono)}
+  #filemenu{position:fixed;z-index:100;min-width:142px;padding:5px;border:1px solid var(--line);
+    border-radius:10px;background:var(--card);box-shadow:var(--shadow)}
+  #filemenu[hidden]{display:none}
+  .filemenu-item{display:block;width:100%;border:0;border-radius:7px;padding:7px 9px;background:transparent;
+    color:var(--ink);font:500 12.5px var(--sans);text-align:left;cursor:pointer}
+  .filemenu-item:hover{background:var(--soft)}
   /* 图片消息：直接渲染缩略图（点击全屏查看）；加载失败由 JS 退回文件卡片 */
-  .crow .bub.img{padding:0;background:transparent}
+  .crow .bub.img{position:relative;padding:0;background:transparent}
   .bub img.chatimg{display:block;max-width:min(320px,72vw);max-height:320px;
     border-radius:10px;cursor:zoom-in;background:var(--bg)}
   #lightbox{position:fixed;inset:0;z-index:98;background:rgba(0,0,0,.82);
@@ -178,7 +215,7 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .st .rbtn{border:none;background:transparent;padding:0;font:inherit;font-weight:600;
     color:var(--err);cursor:pointer}
   .st .rbtn:hover{text-decoration:underline}
-  .cfoot{flex:none;padding:10px 26px 18px}
+  .cfoot{flex:none;padding:10px 26px 18px;background:linear-gradient(0deg,var(--chat-bg) 74%,transparent)}
   /* 输入盒（ChatGPT 式）：白底大圆角细描边软阴影；盒内上输入行、下工具行 */
   .composer{display:flex;flex-direction:column;background:var(--comp);
     border:1px solid var(--line-strong);border-radius:26px;box-shadow:var(--shadow)}
@@ -282,7 +319,21 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .pick.on{border-color:transparent;background:var(--ink);color:var(--bg);font-weight:600}
 
   /* ── 设置面板 ── */
-  #setdlg{width:min(520px,92vw);max-height:86vh;overflow-y:auto}
+  #setdlg{width:min(880px,94vw);height:min(620px,86vh);max-height:86vh;padding:0;overflow:hidden}
+  .setshell{display:grid;grid-template-columns:210px minmax(0,1fr);height:100%}
+  .setnav{padding:30px 14px;background:var(--side);border-right:1px solid var(--side-line)}
+  .setnav h3{margin:0 10px 22px;font-size:19px;letter-spacing:-.02em}
+  .settab{display:block;width:100%;border:0;border-radius:10px;padding:10px 12px;background:transparent;
+    color:var(--side-muted);font:600 14px var(--sans);text-align:left;cursor:pointer;transition:.15s}
+  .settab:hover{background:var(--side-hover);color:var(--side-ink)}
+  .settab.on{background:var(--side-sel);color:var(--side-ink)}
+  .setcontent{position:relative;min-width:0;overflow-y:auto;padding:30px 36px 32px}
+  .setpanel h3{margin:0 0 24px;font-size:20px;letter-spacing:-.02em}
+  .setpanel[hidden]{display:none}
+  .setclose{position:absolute;top:20px;right:22px;width:30px;height:30px;border:0;border-radius:8px;
+    background:transparent;color:var(--muted);font:300 28px/1 var(--sans);cursor:pointer;transition:.15s}
+  .setclose:hover{background:var(--soft);color:var(--ink)}
+  .setpanel .sect{padding:0;border:0}
   .sect{padding:12px 0 6px;border-top:1px solid var(--line)}
   .sect:first-of-type{border-top:none;padding-top:0}
   .secth{font-size:12px;font-weight:600;color:var(--muted);letter-spacing:.06em;margin-bottom:6px}
@@ -304,6 +355,11 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     list-style:revert;margin-bottom:4px}
   details.nodeinfo summary:hover{color:var(--ink)}
   details.nodeinfo .kv .v{font-size:12px;word-break:break-all}
+  @media(max-width:620px){
+    #setdlg{width:94vw;height:min(680px,90vh)}.setshell{grid-template-columns:132px minmax(0,1fr)}
+    .setnav{padding:24px 8px}.setnav h3{margin-inline:8px}.settab{padding-inline:9px;font-size:13px}
+    .setcontent{padding:26px 20px}.pickgrp{flex-wrap:wrap;justify-content:flex-end}
+  }
 
   /* ── toast ── */
   #toasts{position:fixed;bottom:26px;left:50%;transform:translateX(-50%);z-index:99;
@@ -314,21 +370,44 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .toast.in{opacity:1;translate:0 0}
   .toast.err{background:var(--err);color:#fff}
 
-  @media(max-width:640px){ .side{width:198px} .center{padding:20px 16px} }
+  @media(max-width:760px){
+    .app{grid-template-rows:40px minmax(0,1fr)}
+    .appchrome{grid-template-columns:198px minmax(0,1fr)}
+    .chrome-side{padding:0 11px}.chrome-main{padding:0 14px}.chrome-status{display:none}
+    .side{width:198px}.center{padding:20px 16px}.chead{padding-inline:18px}.cfoot{padding-inline:16px}
+  }
+  @media(max-width:560px){
+    .appchrome{grid-template-columns:minmax(0,1fr)}.chrome-main{display:none}
+    .side{width:64px}.brand span:not(.bico),.label,.dev .mid,.dev .xbtn,.sidefoot .smid,.sidefoot .schev,.navnote{display:none}
+    .chrome-side{justify-content:center;padding:0}.brand{justify-content:center;padding:14px 0 8px}.side-scroll{padding-inline:8px}
+    .dev{justify-content:center;padding:10px}.dev .ico{font-size:19px}.sidefoot{padding-inline:8px}.setrow{justify-content:center;padding:10px}
+  }
 </style>
 <script>
 // 提前套主题，避免显式深色用户在浅色系统下首帧闪白（其余 UI 逻辑在页尾主脚本）
 try{
   var _th = localStorage.getItem('antify-theme');
   if (_th === 'light' || _th === 'dark') document.documentElement.dataset.theme = _th;
+  if (navigator.userAgent.includes('Macintosh')) document.documentElement.classList.add('is-macos');
+  if (localStorage.getItem('antify-sidebar') === 'collapsed') document.documentElement.classList.add('sidebar-collapsed');
 }catch(_){}
 </script>
 </head>
 <body>
 <div class="app">
+  <header class="appchrome" aria-label="应用工具栏">
+    <div class="chrome-side">
+      <button class="sidebar-toggle" id="btn-sidebar" title="收起侧栏" aria-label="收起侧栏"><i aria-hidden="true"></i></button>
+    </div>
+    <div class="chrome-main">
+      <div class="crumbs"><span>局域网快传</span><span class="crumb-sep">/</span><b id="chrome-title">设备与会话</b><span class="chrome-context" id="chrome-context"></span></div>
+      <div class="chrome-status"><span class="live-dot" aria-hidden="true"></span><span>本机节点运行中</span></div>
+    </div>
+  </header>
+  <div class="workspace">
 
   <aside class="side">
-    <div class="brand"><span class="bico">🐜</span><span data-t="app">蚂蚁快传</span></div>
+    <div class="brand"><span class="brand-name">AntifyBot</span></div>
     <div class="side-scroll">
       <div class="label"><span data-t="devices">设备</span><span class="n" id="devcount"></span><span class="lsp"></span>
         <button class="sbtn" id="btn-add" data-tt="addDevice" title="手动添加设备（IP）">＋</button></div>
@@ -398,6 +477,7 @@ try{
   </main>
 
 </div>
+</div>
 
 <input type="file" id="filepick" multiple style="display:none">
 <input type="file" id="folderpick" webkitdirectory multiple style="display:none">
@@ -431,10 +511,18 @@ try{
 
 <!-- 设置：通用（主题 / 语言）· 存储（默认保存地址）· 关于（版本 / 检查更新 / 节点信息） -->
 <dialog id="setdlg">
-  <h3 data-t="setTitle">设置</h3>
-
-  <div class="sect">
-    <div class="secth" data-t="secGeneral">通用</div>
+  <div class="setshell">
+    <nav class="setnav" aria-label="设置分类">
+      <h3 data-t="setTitle">设置</h3>
+      <button class="settab on" type="button" data-set-tab="general" data-t="secGeneral">通用</button>
+      <button class="settab" type="button" data-set-tab="storage" data-t="secStorage">存储</button>
+      <button class="settab" type="button" data-set-tab="about" data-t="secAbout">关于</button>
+    </nav>
+    <div class="setcontent">
+      <button class="setclose" id="setclose" type="button" aria-label="关闭">×</button>
+      <section class="setpanel" data-set-panel="general">
+        <h3 data-t="secGeneral">通用</h3>
+        <div class="sect">
     <div class="srow">
       <div class="rl"><div class="rk" data-t="theme">主题</div>
         <div class="rd" data-t="themeDesc">跟随系统或固定浅色 / 深色</div></div>
@@ -452,10 +540,12 @@ try{
         <button class="pick" data-v="en" data-t="langEn">English</button>
       </div>
     </div>
-  </div>
+        </div>
+      </section>
 
-  <div class="sect">
-    <div class="secth" data-t="secStorage">存储</div>
+      <section class="setpanel" data-set-panel="storage" hidden>
+        <h3 data-t="secStorage">存储</h3>
+        <div class="sect">
     <div class="rk" data-t="saveDir">默认保存地址</div>
     <div class="rd" data-t="saveDirDesc" style="margin:1px 0 6px">接收文件落盘位置</div>
     <div class="dirrow">
@@ -464,10 +554,12 @@ try{
     </div>
     <div class="dirhint" data-t="saveDirHint">修改后点「保存」生效</div>
     <div class="diracts"><button class="btn primary small" id="set-dirsave" data-t="save">保存</button></div>
-  </div>
+        </div>
+      </section>
 
-  <div class="sect">
-    <div class="secth" data-t="secAbout">关于</div>
+      <section class="setpanel" data-set-panel="about" hidden>
+        <h3 data-t="secAbout">关于</h3>
+        <div class="sect">
     <div class="kv"><span class="k" data-t="versionL">版本</span>
       <span class="v" id="st-appver" style="font-family:var(--sans);font-size:13px"></span></div>
     <div class="srow">
@@ -488,12 +580,17 @@ try{
         <button class="btn ghost small" id="st-copy" data-t="copyFp">复制指纹</button>
       </div>
     </details>
+        </div>
+      </section>
+    </div>
   </div>
-
-  <div class="modalacts"><button class="btn ghost" id="setclose" data-t="close">关闭</button></div>
 </dialog>
 
 <div id="lightbox" hidden><img alt=""></div>
+<div id="filemenu" role="menu" hidden>
+  <button class="filemenu-item" id="filemenu-copy" type="button" data-t="copy">复制</button>
+  <button class="filemenu-item" id="filemenu-open" type="button" data-t="openFolder">打开文件夹</button>
+</div>
 <div id="toasts"></div>
 
 <script>
@@ -515,6 +612,7 @@ const L = {
     chatHint1:'与「{0}」的对话会显示在这里',
     chatHint2:'拖入文件，或用左下角按钮选择 文件 / 文件夹 / 剪贴板，也可直接输入文字',
     copy:'复制', copied:'已复制', copyFail:'复制失败', show:'显示',
+    filePath:'文件位置', openFolder:'打开文件夹',
     stSending:'⏳ 发送中…', stOk:'✓ 已送达', stFail:'⚠ 未送达 ',
     stRetry:'重试', stFailRedrag:'⚠ 未送达 · 请重新拖入文件',
     progSend:'发送到「{0}」· {1}', progRecv:'来自「{0}」· {1}',
@@ -558,6 +656,7 @@ const L = {
     chatHint1:'Your conversation with {0} will appear here',
     chatHint2:'Drop files here, use the buttons at the bottom-left, or just type',
     copy:'Copy', copied:'Copied', copyFail:'Copy failed', show:'Show',
+    filePath:'File location', openFolder:'Open folder',
     stSending:'⏳ Sending…', stOk:'✓ Delivered', stFail:'⚠ Not delivered ',
     stRetry:'Retry', stFailRedrag:'⚠ Not delivered · drag the file again',
     progSend:'Sending to {0} · {1}', progRecv:'From {0} · {1}',
@@ -635,6 +734,31 @@ let pendingTarget = null;  // filepick 的目标
 let lastChatKey = '', lastChatSel = null; // 会话气泡防抖重绘 + 切换会话时强制贴底
 const onlineMap = new Map(); // fp → 上一轮在线态（翻转时提醒上线/离线）
 let updUrl = '';           // 检查更新拿到的发布页地址
+let fileMenuCtx = null;
+
+function closeFileMenu(){
+  $('filemenu').hidden = true;
+  fileMenuCtx = null;
+}
+function showFileMenu(e, path, open){
+  e.preventDefault();
+  fileMenuCtx = {path, open};
+  const menu = $('filemenu'); menu.hidden = false;
+  const pad = 8, rect = menu.getBoundingClientRect();
+  menu.style.left = Math.min(e.clientX, window.innerWidth - rect.width - pad) + 'px';
+  menu.style.top = Math.min(e.clientY, window.innerHeight - rect.height - pad) + 'px';
+}
+$('filemenu-copy').onclick = () => {
+  if (!fileMenuCtx) return;
+  const {path} = fileMenuCtx, done = () => toast(t('copied'));
+  if (navigator.clipboard) navigator.clipboard.writeText(path).then(done).catch(() => fallbackCopy(path, done));
+  else fallbackCopy(path, done);
+  closeFileMenu();
+};
+$('filemenu-open').onclick = () => { if (fileMenuCtx) fileMenuCtx.open(); closeFileMenu(); };
+document.addEventListener('pointerdown', e => { if (!e.target.closest('#filemenu')) closeFileMenu(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeFileMenu(); });
+document.addEventListener('scroll', closeFileMenu, true);
 
 function toast(msg, err){
   const box = $('toasts');
@@ -809,10 +933,15 @@ function renderCenter(s){
   $('waitview').hidden = !!d;
   if (d){
     $('ch-name').textContent = d.alias;
-    $('ch-meta').textContent = d.online
+    const meta = d.online
       ? t('devEmptyMeta', d.deviceType || '?', d.ip) + ' · ' + t('seenAgo', fmtAgo(d.lastSeenMs))
       : t('offlineLastSeen', fmtAgo(d.lastSeenMs));
+    $('ch-meta').textContent = meta;
+    $('chrome-title').textContent = d.alias;
+    $('chrome-context').textContent = meta;
   } else {
+    $('chrome-title').textContent = t('devices');
+    $('chrome-context').textContent = '';
     const allOff = s.devices.length && !s.devices.some(x => x.online);
     $('c-title').textContent = allOff ? t('waitOffTitle') : t('waitTitle');
     $('c-sub').textContent = allOff
@@ -893,6 +1022,18 @@ function renderChat(s){
       } else fillChip();
     }
     col.appendChild(bub);
+    if (m.kind === 'file'){
+      // 收到文件位于下载目录，原生选择器发送的文件保存了源绝对路径。
+      const localPath = m.file
+        ? ((s.me && s.me.dir ? s.me.dir.replace(/[\\/]$/, '') +
+            (s.me.dir.includes('\\') ? '\\' : '/') : '') + m.file)
+        : (m.srcPath || '');
+      if (localPath){
+        bub.title = t('filePath');
+        bub.oncontextmenu = e => showFileMenu(e, localPath,
+          () => { m.file ? reveal(m.file) : revealSource(m.id); });
+      }
+    }
     if (m.kind === 'text' && !m.out){ // 文字不落盘，「复制」是取走内容的唯一途径
       const cp = document.createElement('button'); cp.className = 'rxb';
       cp.textContent = t('copy');
@@ -901,11 +1042,6 @@ function renderChat(s){
           navigator.clipboard.writeText(txt).then(done).catch(() => fallbackCopy(txt, done));
         else fallbackCopy(txt, done); };
       col.appendChild(cp);
-    }
-    if (m.kind === 'file' && !m.out && m.file){ // 收到的文件可在 Finder / 资源管理器中定位
-      const b = document.createElement('button'); b.className = 'rxb';
-      b.textContent = t('show'); b.onclick = () => reveal(m.file);
-      col.appendChild(b);
     }
     if (m.out){ // 出站消息状态行：⏳ 发送中 / ✓ 已送达 / ⚠ 未送达（文本与带源路径的可重试）
       const st = document.createElement('div'); st.className = 'st';
@@ -1218,6 +1354,12 @@ async function reveal(file){
   if (!r.ok){ const v = await r.json().catch(()=>({})); toast(v.error || t('openFail'), true); }
 }
 
+async function revealSource(messageId){
+  const r = await fetch('/api/ui/reveal', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({messageId})});
+  if (!r.ok){ const v = await r.json().catch(()=>({})); toast(v.error || t('openFail'), true); }
+}
+
 function fallbackCopy(txt, done){
   const ta = document.createElement('textarea');
   ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
@@ -1244,6 +1386,19 @@ function syncPicks(){
   document.querySelectorAll('#langpick .pick').forEach(b =>
     b.classList.toggle('on', b.dataset.v === lang));
 }
+function selectSettingsPanel(name){
+  document.querySelectorAll('[data-set-tab]').forEach(b => {
+    const on = b.dataset.setTab === name;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-selected', String(on));
+  });
+  document.querySelectorAll('[data-set-panel]').forEach(p => {
+    p.hidden = p.dataset.setPanel !== name;
+  });
+}
+document.querySelectorAll('[data-set-tab]').forEach(b => {
+  b.onclick = () => selectSettingsPanel(b.dataset.setTab);
+});
 $('themepick').addEventListener('click', e => {
   const b = e.target.closest('.pick'); if (!b) return;
   applyTheme(b.dataset.v); syncPicks();
@@ -1252,6 +1407,15 @@ $('langpick').addEventListener('click', e => {
   const b = e.target.closest('.pick'); if (!b) return;
   applyLang(b.dataset.v);
 });
+
+$('btn-sidebar').onclick = () => {
+  const root = document.documentElement;
+  root.classList.toggle('sidebar-collapsed');
+  const collapsed = root.classList.contains('sidebar-collapsed');
+  $('btn-sidebar').title = collapsed ? '展开侧栏' : '收起侧栏';
+  $('btn-sidebar').setAttribute('aria-label', collapsed ? '展开侧栏' : '收起侧栏');
+  lsSet('antify-sidebar', collapsed ? 'collapsed' : 'expanded');
+};
 
 $('btn-settings').onclick = () => {
   const me = window._state && window._state.me;
@@ -1265,6 +1429,7 @@ $('btn-settings').onclick = () => {
   updUrl = '';
   $('upd-state').textContent = '';
   $('updresult').hidden = true;
+  selectSettingsPanel('general');
   syncPicks();
   $('setdlg').showModal();
 };

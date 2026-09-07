@@ -1160,21 +1160,41 @@ async fn send_item(
 
 #[derive(Deserialize)]
 struct UiReveal {
-    file: String,
+    /// 已接收文件：相对于受控下载目录的文件名。
+    file: Option<String>,
+    /// 已发送文件：仅允许通过持久化聊天记录 ID 取回其源路径，避免任意路径打开。
+    #[serde(rename = "messageId")]
+    message_id: Option<u64>,
 }
 
 async fn ui_reveal(State(state): State<Shared>, axum::Json(body): axum::Json<UiReveal>) -> Response {
-    let dl = state.download_dir.read().await.clone();
-    let dir = dl.canonicalize().unwrap_or(dl);
-    let path = dir.join(&body.file);
-    // 必须真实存在才能 canonicalize 成功；解析失败（含 .. 穿越、不存在）一律拒绝，
-    // 之后 starts_with 在两条已解析路径上比较，不可被词法绕过
-    let Ok(canon) = path.canonicalize() else {
-        return err_json(StatusCode::FORBIDDEN, "路径越界");
+    let canon = if let Some(id) = body.message_id {
+        // 只能打开 SQLite 中这条已发送文件消息登记过的源路径。
+        let Some(msg) = state.db.get_msg(id) else {
+            return err_json(StatusCode::NOT_FOUND, "消息不存在");
+        };
+        if !msg.out || msg.kind != "file" || msg.src_path.is_empty() {
+            return err_json(StatusCode::FORBIDDEN, "该文件没有可打开的本地路径");
+        }
+        let Ok(path) = std::path::PathBuf::from(msg.src_path).canonicalize() else {
+            return err_json(StatusCode::NOT_FOUND, "源文件已不存在");
+        };
+        path
+    } else {
+        let Some(file) = body.file else {
+            return err_json(StatusCode::BAD_REQUEST, "缺少文件路径");
+        };
+        let dl = state.download_dir.read().await.clone();
+        let dir = dl.canonicalize().unwrap_or(dl);
+        let Ok(path) = dir.join(file).canonicalize() else {
+            return err_json(StatusCode::FORBIDDEN, "路径越界");
+        };
+        // 已接收文件必须仍位于受控下载目录，挡住 .. 穿越。
+        if !path.starts_with(&dir) {
+            return err_json(StatusCode::FORBIDDEN, "路径越界");
+        }
+        path
     };
-    if !canon.starts_with(&dir) {
-        return err_json(StatusCode::FORBIDDEN, "路径越界");
-    }
     #[cfg(target_os = "macos")]
     let ok = std::process::Command::new("open").arg("-R").arg(&canon).spawn().is_ok();
     #[cfg(target_os = "windows")]

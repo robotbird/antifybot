@@ -49,11 +49,17 @@ fn main() {
             let url: tauri::Url = format!("http://127.0.0.1:{ui_port}/")
                 .parse()
                 .map_err(|e| format!("面板 URL 解析失败: {e}"))?;
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("AntifyBot")
                 .inner_size(900.0, 680.0)
-                .min_inner_size(720.0, 540.0)
-                .build()?;
+                .min_inner_size(720.0, 540.0);
+            // macOS 让网页工具栏延伸至标题栏，同时保留系统交通灯。
+            // Windows 仍使用系统标题栏，避免额外维护窗口控制按钮。
+            #[cfg(target_os = "macos")]
+            let window = window
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true);
+            window.build()?;
 
             // 5) 系统托盘：左键点图标切换窗口显隐，菜单提供「显示面板 / 退出」
             let show = MenuItem::with_id(app, "show", "显示面板", true, None::<&str>)?;
