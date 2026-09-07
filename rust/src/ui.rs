@@ -2,12 +2,13 @@
 //! 左右分栏：ChatGPT 式浅暖灰侧栏（品牌 + 设备列表 + 左下角「设置」入口），
 //! 近白主区；深色模式镜像为暗一档。
 //! 设备上线 → 左侧会话列表式列表（第二行显示最近一条消息预览）；
-//! 点选设备 → 会话视图（参考微信「文件传输助手」）：头部横带取侧栏同色
-//! （与侧栏连成 L 形，和消息区分层），文字为彩色气泡、图片直接显示
-//! 缩略图（点击全屏查看，加载失败退回文件卡片）、文件为中性卡片，
-//! 头像在每条消息最外侧、时间按间隔居中分组；收到的文件带「显示」、文字带「复制」；
-//! 活动传输为会话流内吸顶进度卡，最下面是微信式输入框：一个盒子内上为输入行、
-//! 下为工具行 —— 左下角 文件 / 文件夹 / 剪贴板 三个图标按钮，右侧圆形图标发送。
+//! 点选设备 → 会话视图（ChatGPT 式灰白）：头部横带取侧栏同色（与侧栏连成 L 形），
+//! 消息区纯白（深色为 #212121，比侧栏亮半档拉开 L 形层次）——出站灰底大圆角气泡、入站无气泡纯文本、无头像，
+//! 图片直接显示缩略图（点击全屏查看，加载失败退回文件卡片）、文件为中性卡片，
+//! 时间按间隔居中分组；收到的文件带「显示」、文字带「复制」；
+//! 活动传输为会话流内吸顶进度卡，最下面是 ChatGPT 式输入盒（白底大圆角细描边）：
+//! 盒内上为输入行、下为工具行 —— 左下角 文件 / 文件夹 / 剪贴板 三个图标按钮，
+//! 右侧深色圆形发送钮。
 //! 设置面板（侧栏左下角进入）分三节：通用（主题 / 语言）、存储（默认保存地址）、
 //! 关于（版本 / 检查更新 / 节点信息）；主题三态 + 中英文界面，localStorage 持久化。
 //! 事件以 toast 呈现。
@@ -28,6 +29,8 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     --side:#ececea; --side-ink:#1d1d1f; --side-muted:#86868b;
     --side-line:rgba(0,0,0,.08); --side-hover:rgba(0,0,0,.045);
     --side-sel:rgba(0,0,0,.075);
+    /* 会话区（ChatGPT 式）：纯白消息区、灰底出站气泡、白底输入盒 */
+    --chat-bg:#ffffff; --bub-out:#f0f0f0; --comp:#ffffff;
     --soft:rgba(0,0,0,.055); --soft-hover:rgba(0,0,0,.10);
     --shadow:0 1px 2px rgba(0,0,0,.03), 0 12px 32px -20px rgba(0,0,0,.28);
     --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",
@@ -42,6 +45,7 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     --side:#131315; --side-ink:#f0f0f2; --side-muted:#9a9aa0;
     --side-line:rgba(255,255,255,.10); --side-hover:rgba(255,255,255,.05);
     --side-sel:rgba(255,255,255,.09);
+    --chat-bg:#212121; --bub-out:#303030; --comp:#303030;
     --soft:rgba(255,255,255,.07); --soft-hover:rgba(255,255,255,.14);
     --shadow:0 1px 2px rgba(0,0,0,.4), 0 16px 36px -20px rgba(0,0,0,.7);
   }
@@ -54,6 +58,7 @@ pub const DASHBOARD: &str = r##"<!doctype html>
       --side:#131315; --side-ink:#f0f0f2; --side-muted:#9a9aa0;
       --side-line:rgba(255,255,255,.10); --side-hover:rgba(255,255,255,.05);
       --side-sel:rgba(255,255,255,.09);
+    --chat-bg:#212121; --bub-out:#303030; --comp:#303030;
       --soft:rgba(255,255,255,.07); --soft-hover:rgba(255,255,255,.14);
       --shadow:0 1px 2px rgba(0,0,0,.4), 0 16px 36px -20px rgba(0,0,0,.7);
     }
@@ -121,7 +126,7 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .main{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0}
 
   /* 会话视图（选中设备后）：头部 + 气泡流 + 底部聊天输入条 */
-  #chatview{flex:1;min-height:0;display:flex;flex-direction:column}
+  #chatview{flex:1;min-height:0;display:flex;flex-direction:column;background:var(--chat-bg)}
   #chatview[hidden]{display:none}
   /* 头部横带取侧栏同色，与左侧连成 L 形，和消息区拉开层次 */
   .chead{flex:none;padding:13px 26px;border-bottom:1px solid var(--line-strong);
@@ -132,28 +137,23 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .cscroll{flex:1;min-height:0;overflow-y:auto}
   body.dropping .cscroll{box-shadow:inset 0 0 0 1.5px var(--accent)}
-  #chatlist{display:flex;flex-direction:column;gap:12px;padding:18px 26px;
+  #chatlist{display:flex;flex-direction:column;gap:16px;padding:22px 26px;
     width:min(720px,100%);margin:0 auto}
   .chathint{margin:60px auto;text-align:center;color:var(--muted);font-size:13px;line-height:1.9}
   .chathint small{font-size:11.5px;opacity:.85}
-  /* 气泡（微信文件传输助手式）：头像在最外侧、时间居中分组、文件用中性卡片 */
+  /* 消息（ChatGPT 式）：无头像；出站灰底大圆角气泡、入站无气泡纯文本；文件用中性卡片 */
   .tm{align-self:center;font-size:11px;color:var(--muted);margin:2px 0}
-  .crow{display:flex;gap:10px;align-items:flex-start}
+  .crow{display:flex;align-items:flex-start}
   .crow.out{flex-direction:row-reverse}
-  .ava{flex:none;width:34px;height:34px;border-radius:9px;background:var(--card);
-    border:1px solid var(--line);display:grid;place-items:center;font-size:17px}
-  .crow.out .ava{background:var(--soft);border-color:transparent}
   .msgcol{min-width:0;max-width:min(76%,540px);display:flex;flex-direction:column;
     align-items:flex-start}
   .crow.out .msgcol{align-items:flex-end}
-  .bub{padding:9px 14px;border-radius:14px;font-size:14px;line-height:1.55;
+  .bub{padding:2px 0;border-radius:18px;font-size:15px;line-height:1.65;
     text-align:left;white-space:pre-wrap;word-break:break-word}
-  .crow.in .bub{background:var(--card);border:1px solid var(--line);
-    box-shadow:var(--shadow);border-top-left-radius:5px}
-  .crow.out .bub{background:var(--accent);color:#fff;border-top-right-radius:5px}
-  /* 文件消息：无论方向都是中性卡片（选择器带 .crow 抬高优先级，压过出站彩色气泡） */
+  .crow.out .bub{background:var(--bub-out);color:var(--ink);padding:10px 16px}
+  /* 文件消息：无论方向都是中性卡片（选择器带 .crow 抬高优先级，压过出站灰气泡） */
   .crow .bub.file{background:var(--card);color:var(--ink);border:1px solid var(--line);
-    box-shadow:var(--shadow);border-radius:14px}
+    box-shadow:var(--shadow);border-radius:14px;padding:9px 14px}
   .fchip{display:flex;align-items:center;gap:9px;min-width:0}
   .fchip .fico{font-size:20px;line-height:1;flex:none}
   .fchip .fmid{min-width:0}
@@ -161,7 +161,7 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .fchip .fsz{font-size:11px;opacity:.75;font-family:var(--mono)}
   /* 图片消息：直接渲染缩略图（点击全屏查看）；加载失败由 JS 退回文件卡片 */
-  .crow .bub.img{padding:4px}
+  .crow .bub.img{padding:0;background:transparent}
   .bub img.chatimg{display:block;max-width:min(320px,72vw);max-height:320px;
     border-radius:10px;cursor:zoom-in;background:var(--bg)}
   #lightbox{position:fixed;inset:0;z-index:98;background:rgba(0,0,0,.82);
@@ -178,24 +178,22 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .st .rbtn{border:none;background:transparent;padding:0;font:inherit;font-weight:600;
     color:var(--err);cursor:pointer}
   .st .rbtn:hover{text-decoration:underline}
-  .cfoot{flex:none;padding:12px 26px 16px;border-top:1px solid var(--line)}
-  /* 微信式输入框：盒子内上为输入行、下为工具行（左：文件/文件夹/剪贴板；右：发送） */
-  .composer{display:flex;flex-direction:column;background:var(--card);
-    border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);
-    transition:border-color .15s}
-  .composer:focus-within{border-color:var(--accent)}
-  #chatinput{border:none;background:transparent;outline:none;padding:11px 14px 3px;
-    font-size:14px;font-family:var(--sans);color:var(--ink)}
+  .cfoot{flex:none;padding:10px 26px 18px}
+  /* 输入盒（ChatGPT 式）：白底大圆角细描边软阴影；盒内上输入行、下工具行 */
+  .composer{display:flex;flex-direction:column;background:var(--comp);
+    border:1px solid var(--line-strong);border-radius:26px;box-shadow:var(--shadow)}
+  #chatinput{border:none;background:transparent;outline:none;padding:13px 18px 3px;
+    font-size:15px;font-family:var(--sans);color:var(--ink)}
   #chatinput::placeholder{color:var(--muted)}
   #chatinput:disabled{opacity:.6}
-  .ctools{display:flex;align-items:center;gap:2px;padding:4px 8px 8px}
-  .tool{width:30px;height:30px;border-radius:8px;border:none;background:transparent;
+  .ctools{display:flex;align-items:center;gap:4px;padding:4px 10px 10px}
+  .tool{width:30px;height:30px;border-radius:50%;border:none;background:transparent;
     color:var(--muted);display:grid;place-items:center;cursor:pointer;transition:.15s}
-  .tool:hover{background:var(--accent-soft);color:var(--accent-deep)}
+  .tool:hover{background:var(--soft);color:var(--ink)}
   .tool svg{width:17px;height:17px;display:block}
   .ctools .tsp{flex:1}
-  .tool.send{background:var(--accent);color:#fff;border-radius:50%}
-  .tool.send:hover{background:var(--accent-deep);color:#fff}
+  .tool.send{background:var(--ink);color:var(--bg)}
+  .tool.send:hover{background:var(--ink);opacity:.85}
 
   /* 等待屏（未选设备） */
   #waitview{flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto}
@@ -835,7 +833,7 @@ function fmtDay(ms){
     : d.toLocaleDateString(LOCALE(), {month:'numeric', day:'numeric'}) + ' ' + hm;
 }
 
-// 会话气泡流（微信式：头像在最外侧、时间居中分组、文件为中性卡片；内容无变化不重绘）
+// 会话消息流（ChatGPT 式：出站灰气泡、入站纯文本、时间居中分组、文件中性卡片；内容无变化不重绘）
 function renderChat(s){
   const sc = $('cscroll'), box = $('chatlist');
   if (!s || !sel){ lastChatKey = ''; box.innerHTML = ''; return; }
@@ -853,8 +851,6 @@ function renderChat(s){
     hint.innerHTML = `${esc(t('chatHint1', d ? d.alias : ''))}<br><small>${esc(t('chatHint2'))}</small>`;
     box.appendChild(hint);
   }
-  const dev = (s.devices||[]).find(x => x.fingerprint === sel);
-  const peerAva = dev ? emoji(dev) : '🖥️';
   let prevAt = 0;
   for (const m of msgs){
     if (!prevAt || m.at - prevAt > 5*60*1000){ // 间隔 > 5 分钟插一条居中时间
@@ -865,8 +861,6 @@ function renderChat(s){
     prevAt = m.at;
     const crow = document.createElement('div');
     crow.className = 'crow ' + (m.out ? 'out' : 'in');
-    const ava = document.createElement('div'); ava.className = 'ava';
-    ava.textContent = m.out ? '🐜' : peerAva;
     const col = document.createElement('div'); col.className = 'msgcol';
     const bub = document.createElement('div'); bub.className = 'bub';
     if (m.kind === 'text'){
@@ -928,7 +922,7 @@ function renderChat(s){
       }
       if (st.textContent) col.appendChild(st); // 入站与旧数据无状态行
     }
-    crow.append(ava, col);
+    crow.appendChild(col);
     box.appendChild(crow);
   }
   if (nearBottom || switched) sc.scrollTop = sc.scrollHeight;
