@@ -2,6 +2,7 @@
 //! 左右分栏：ChatGPT 式浅暖灰侧栏（品牌 + 设备列表 + 左下角「设置」入口），
 //! 近白主区；深色模式镜像为暗一档。
 //! 设备上线 → 左侧会话列表式列表（第二行显示最近一条消息预览）；
+//! 本机固定钉在列表首位（自我会话：仅文字，文件 / 文件夹按钮停用，顶栏与头部显示本机 ip:端口）；
 //! 点选设备 → 会话视图（ChatGPT 式灰白）：头部横带取侧栏同色（与侧栏连成 L 形），
 //! 消息区纯白（深色为 #212121，比侧栏亮半档拉开 L 形层次）——出站灰底大圆角气泡、入站无气泡纯文本、无头像，
 //! 图片直接显示缩略图（点击全屏查看，加载失败退回文件卡片）、文件为中性卡片，
@@ -228,6 +229,8 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     color:var(--muted);display:grid;place-items:center;cursor:pointer;transition:.15s}
   .tool:hover{background:var(--soft);color:var(--ink)}
   .tool svg{width:17px;height:17px;display:block}
+  /* 本机会话：文件 / 文件夹不可用（文字与剪贴板文本仍可用） */
+  .tool:disabled{opacity:.32;cursor:default;pointer-events:none}
   .ctools .tsp{flex:1}
   .tool.send{background:var(--ink);color:var(--bg)}
   .tool.send:hover{background:var(--ink);opacity:.85}
@@ -406,7 +409,7 @@ try{
     </div>
     <div class="chrome-main">
       <div class="crumbs"><span>局域网快传</span><span class="crumb-sep">/</span><b id="chrome-title">设备与会话</b><span class="chrome-context" id="chrome-context"></span></div>
-      <div class="chrome-status"><span class="live-dot" aria-hidden="true"></span><span>本机节点运行中</span></div>
+      <div class="chrome-status"><span class="live-dot" aria-hidden="true"></span><span>本机节点运行中</span><span id="chrome-addr"></span></div>
     </div>
   </header>
   <div class="workspace">
@@ -614,8 +617,11 @@ const L = {
     sendClip:'发送剪贴板内容（截图 / 文本）', send:'发送',
     previewImg:'[图片]', offline:'离线', offlineLastSeen:'离线 · 最后可见 {0}', seenAgo:'{0}可见',
     devCount:'在线 {0}/{1}', devEmptyMeta:'{0} · {1}',
+    selfTag:'本机', selfName:'{0}（本机）',
+    selfNoFiles:'本机会话不支持发送文件 / 文件夹',
     chatHint1:'与「{0}」的对话会显示在这里',
     chatHint2:'拖入文件，或用左下角按钮选择 文件 / 文件夹 / 剪贴板，也可直接输入文字',
+    chatHint2Self:'发给本机的文字备忘会显示在这里（不支持发送文件 / 文件夹）',
     copy:'复制', copied:'已复制', copyFail:'复制失败', show:'显示',
     filePath:'文件位置', openFolder:'打开文件夹',
     stSending:'⏳ 发送中…', stOk:'✓ 已送达', stFail:'⚠ 未送达 ',
@@ -661,8 +667,11 @@ const L = {
     sendClip:'Send clipboard (screenshot / text)', send:'Send',
     previewImg:'[Image]', offline:'Offline', offlineLastSeen:'Offline · last seen {0}', seenAgo:'seen {0}',
     devCount:'{0}/{1} online', devEmptyMeta:'{0} · {1}',
+    selfTag:'This device', selfName:'{0} (This device)',
+    selfNoFiles:"Can't send files or folders to this device",
     chatHint1:'Your conversation with {0} will appear here',
     chatHint2:'Drop files here, use the buttons at the bottom-left, or just type',
+    chatHint2Self:'Text notes to this device appear here (files and folders not supported)',
     copy:'Copy', copied:'Copied', copyFail:'Copy failed', show:'Show',
     filePath:'File location', openFolder:'Open folder',
     stSending:'⏳ Sending…', stOk:'✓ Delivered', stFail:'⚠ Not delivered ',
@@ -808,13 +817,23 @@ function hasFiles(e){
 
 function render(s){
   window._state = s;
+  const me = s.me || {};
+  const selfFp = me.fingerprint || '';
+  const selfIps = me.ips || [];
+  // 本机地址串（右侧顶栏 / 自我会话头部展示）
+  const selfAddr0 = selfIps.length ? selfIps[0] + ':' + me.port : '';
+  const selfAddrs = selfIps.map(ip => ip + ':' + me.port);
+  $('chrome-addr').textContent = selfAddr0 ? ' · ' + selfAddr0 : '';
+  $('chrome-addr').title = selfAddrs.join('\n');
 
   // ── 侧栏设备（内容有变化才重绘，避免打断 hover / 拖放；key 含语言，切语言强制重绘） ──
-  // 会话列表式：第二行显示与该设备的最近一条消息预览；离线设备置灰保留
+  // 会话列表式：第二行显示与该设备的最近一条消息预览；离线设备置灰保留；
+  // 本机钉在首位（自我会话，无 ✕、拒收文件拖放）
   const lastByFp = {};
   for (const m of (s.chat||[])) lastByFp[m.peer] = m;
   // 防抖 key：lastSeenMs 每轮轮询都在变，按分钟分桶；identity/在线态/预览 id 变了才重绘
-  const dj = lang + ':' + s.devices.map(d =>
+  const dj = lang + ':' + me.alias + ':' + selfAddrs.join(',') + ':' +
+    ((lastByFp[selfFp]||{}).id||0) + '|' + s.devices.map(d =>
     d.fingerprint + ':' + d.alias + ':' + d.ip + ':' + (d.online?1:0) + ':' +
     Math.floor(d.lastSeenMs/60000) + ':' + ((lastByFp[d.fingerprint]||{}).id||0)
   ).join('|');
@@ -826,6 +845,30 @@ function render(s){
     const onlineN = s.devices.filter(d => d.online).length;
     $('devcount').textContent = s.devices.length
       ? '· ' + t('devCount', onlineN, s.devices.length) : '';
+    if (selfFp){
+      const row = document.createElement('div');
+      row.className = 'dev' + (sel === selfFp ? ' on' : '');
+      row.dataset.fp = selfFp; row.tabIndex = 0; row.title = t('selfName', me.alias);
+      const ico = document.createElement('div'); ico.className = 'ico'; ico.textContent = '🖥️';
+      const mid = document.createElement('div'); mid.className = 'mid';
+      const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = t('selfName', me.alias);
+      const meta = document.createElement('div'); meta.className = 'meta';
+      const lm = lastByFp[selfFp];
+      const preview = lm && lm.kind === 'text'
+        ? lm.text.replace(/\s+/g, ' ').slice(0, 42) : '';
+      meta.textContent = preview || selfAddr0 || ('127.0.0.1:' + me.port);
+      mid.append(nm, meta);
+      row.append(ico, mid);
+      row.onclick = () => { sel = (sel === selfFp ? null : selfFp); syncSel(); };
+      // 拖文件到本机行：高亮照常，松手明确提示不支持
+      row.ondragover = e => { if (hasFiles(e)){ e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy'; row.classList.add('dropover'); } };
+      row.ondragleave = () => row.classList.remove('dropover');
+      row.ondrop = e => { if (!hasFiles(e)) return;
+        e.preventDefault(); e.stopPropagation(); row.classList.remove('dropover');
+        toast(t('selfNoFiles'), true); };
+      box.appendChild(row);
+    }
     for (const d of s.devices){
       const row = document.createElement('div');
       row.className = 'dev' + (d.fingerprint === sel ? ' on' : '') + (d.online ? '' : ' off');
@@ -878,8 +921,8 @@ function render(s){
     for (const f of [...onlineMap.keys()]) if (!nowFp.has(f)) onlineMap.delete(f);
   }
 
-  // 选中设备被移除 → 回到等待屏（离线设备保留在列表，不触发）
-  if (sel && !s.devices.some(d => d.fingerprint === sel)) sel = null;
+  // 选中设备被移除 → 回到等待屏（离线设备保留在列表，不触发；本机是钉住项，不参与）
+  if (sel && sel !== selfFp && !s.devices.some(d => d.fingerprint === sel)) sel = null;
   // 正在收文件且没开任何会话 → 自动切到发送者的会话（进度卡可见）
   if (!sel && s.session && s.session.active){
     const d = (s.devices||[]).find(x => x.ip === s.session.senderIp);
@@ -939,16 +982,32 @@ function render(s){
 }
 
 // 主区：选中设备 → 会话视图（气泡 + 聊天输入条）；未选 → 等待屏
+// 本机（侧栏钉住项）也走会话视图：头部显示本机全部 ip:端口，文件 / 文件夹工具停用
 function renderCenter(s){
   s = s || window._state; if (!s) return;
-  const d = (s.devices||[]).find(x => x.fingerprint === sel);
+  const me = s.me || {};
+  const selfFp = me.fingerprint || '';
+  const isSelf = !!selfFp && sel === selfFp;
+  const d = isSelf
+    ? { alias: me.alias, online: true, deviceType: 'self', lastSeenMs: 0 }
+    : (s.devices||[]).find(x => x.fingerprint === sel);
   $('chatview').hidden = !d;
   $('waitview').hidden = !!d;
+  // 本机会话仅文字：文件 / 文件夹按钮停用（剪贴板按钮保留——粘贴文本仍可用）
+  $('btn-cfile').disabled = isSelf;
+  $('btn-cfolder').disabled = isSelf;
   if (d){
-    $('ch-name').textContent = d.alias;
-    const meta = d.online
-      ? t('devEmptyMeta', d.deviceType || '?', d.ip) + ' · ' + t('seenAgo', fmtAgo(d.lastSeenMs))
-      : t('offlineLastSeen', fmtAgo(d.lastSeenMs));
+    let meta;
+    if (isSelf){
+      const addrs = (me.ips||[]).map(ip => ip + ':' + me.port);
+      meta = addrs.length ? addrs.join(' · ') : ('127.0.0.1:' + me.port);
+      $('ch-name').textContent = me.alias + ' · ' + t('selfTag');
+    } else {
+      $('ch-name').textContent = d.alias;
+      meta = d.online
+        ? t('devEmptyMeta', d.deviceType || '?', d.ip) + ' · ' + t('seenAgo', fmtAgo(d.lastSeenMs))
+        : t('offlineLastSeen', fmtAgo(d.lastSeenMs));
+    }
     $('ch-meta').textContent = meta;
     $('chrome-title').textContent = d.alias;
     $('chrome-context').textContent = meta;
@@ -979,6 +1038,8 @@ function fmtDay(ms){
 function renderChat(s){
   const sc = $('cscroll'), box = $('chatlist');
   if (!s || !sel){ lastChatKey = ''; box.innerHTML = ''; return; }
+  const selfFp = (s.me||{}).fingerprint || '';
+  const isSelf = !!selfFp && sel === selfFp; // 本机会话：无出站状态行，空态文案不同
   const msgs = (s.chat||[]).filter(m => m.peer === sel);
   // 防抖 key 含语言与出站状态：⏳→✓/⚠ 翻转、切语言都必须重绘
   const key = lang + ':' + sel + ':' + msgs.map(m => m.id + ':' + (m.out ? m.status : '')).join(',');
@@ -988,9 +1049,11 @@ function renderChat(s){
   const nearBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 90;
   box.innerHTML = '';
   if (!msgs.length){
-    const d = (s.devices||[]).find(x => x.fingerprint === sel);
+    const d = isSelf
+      ? { alias: (s.me||{}).alias }
+      : (s.devices||[]).find(x => x.fingerprint === sel);
     const hint = document.createElement('div'); hint.className = 'chathint';
-    hint.innerHTML = `${esc(t('chatHint1', d ? d.alias : ''))}<br><small>${esc(t('chatHint2'))}</small>`;
+    hint.innerHTML = `${esc(t('chatHint1', d ? d.alias : ''))}<br><small>${esc(t(isSelf ? 'chatHint2Self' : 'chatHint2'))}</small>`;
     box.appendChild(hint);
   }
   let prevAt = 0;
@@ -1056,7 +1119,7 @@ function renderChat(s){
         else fallbackCopy(txt, done); };
       col.appendChild(cp);
     }
-    if (m.out){ // 出站消息状态行：⏳ 发送中 / ✓ 已送达 / ⚠ 未送达（文本与带源路径的可重试）
+    if (m.out && !isSelf){ // 出站消息状态行：⏳ 发送中 / ✓ 已送达 / ⚠ 未送达（文本与带源路径的可重试；本机即时落库无需状态）
       const st = document.createElement('div'); st.className = 'st';
       if (m.status === 'sending') st.textContent = t('stSending');
       else if (m.status === 'ok') st.textContent = t('stOk');
@@ -1093,7 +1156,10 @@ async function poll(){
 }
 
 // ── 发送 ──
+// 本机会话仅文字：文件 / 文件夹在此统一拦截（拖放、粘贴、剪贴板、按钮全部收口）
+const isSelfTarget = fp => !!fp && window._state && fp === (window._state.me||{}).fingerprint;
 async function sendFiles(fp, files){
+  if (isSelfTarget(fp)) return toast(t('selfNoFiles'), true);
   sel = fp; syncSel(); // 发送即切到目标会话（进度卡在会话流顶部可见）
   // 浏览器流式中转不可 seek、无断点续传：大文件只提示（不阻断），引导走原生选择器
   const BIG = 512 * 1024 * 1024;
@@ -1137,6 +1203,7 @@ $('filepick').onchange = async () => {
 // ── 原生选择器（服务端 rfd）+ 路径发送（记录 src_path，失败可重试） ──
 // 目录会由服务端递归展开，每个文件独立气泡
 async function sendPaths(fp, paths){
+  if (isSelfTarget(fp)) return toast(t('selfNoFiles'), true);
   sel = fp; syncSel();
   for (const p of paths){
     try{

@@ -309,8 +309,8 @@ async fn register_back(state: Shared, client: reqwest::Client, device: Device) {
 }
 
 /// 枚举适合多播的本地 IPv4 接口（跳过回环与 utun/tun/tap 隧道）。
-/// 返回空 = 交给系统默认接口。
-fn mcast_interfaces() -> Vec<Ipv4Addr> {
+/// 返回空 = 交给系统默认接口。面板 me.ips 也复用此清单展示本机地址。
+pub(crate) fn mcast_interfaces() -> Vec<Ipv4Addr> {
     let mut out: Vec<Ipv4Addr> = Vec::new();
     if let Ok(list) = if_addrs::get_if_addrs() {
         for itf in list {

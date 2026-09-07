@@ -1027,6 +1027,10 @@ async fn ui_state(State(state): State<Shared>) -> Response {
             "alias": id.alias,
             "fingerprint": id.fingerprint,
             "port": id.port,
+            "ips": crate::discovery::mcast_interfaces()
+                .iter()
+                .map(|ip| ip.to_string())
+                .collect::<Vec<_>>(),
             "version": crate::config::PROTOCOL_VERSION,
             "appVersion": env!("CARGO_PKG_VERSION"),
             "dir": state.download_dir.read().await.display().to_string(),
@@ -1234,6 +1238,22 @@ struct UiSendText {
 }
 
 async fn ui_send_text(State(state): State<Shared>, axum::Json(body): axum::Json<UiSendText>) -> Response {
+    // 发给本机（侧栏钉住的自我会话）：不出网络，直接落一条已送达消息
+    if body.target == state.identity.fingerprint {
+        state
+            .push_chat(crate::state::ChatMsg {
+                out: true,
+                peer: state.identity.fingerprint.clone(),
+                peer_alias: state.identity.alias.clone(),
+                kind: "text".into(),
+                text: body.text,
+                at: now_ms(),
+                status: "ok".into(),
+                ..Default::default()
+            })
+            .await;
+        return Json(json!({"ok": true})).into_response();
+    }
     let Some(target) = state.devices.lock().await.get(&body.target).cloned() else {
         return err_json(StatusCode::NOT_FOUND, "目标设备不存在");
     };
