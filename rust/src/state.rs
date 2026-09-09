@@ -167,6 +167,11 @@ pub struct AppState {
     pub rx_write: Mutex<()>,
     /// 出站传输取消标志（面板「取消」按钮置位；client::send 的块/轮循环检查）
     pub send_cancel: std::sync::atomic::AtomicBool,
+    /// 面板焦点快照：(是否可见且聚焦, 上次上报时刻)。面板随 /api/ui/state 轮询捎带
+    /// 上报——持续在报且聚焦 = 用户正看着会话流，节点静音系统通知；
+    /// 收进托盘 / 切后台后 WebView 挂起自然停报，超窗自动回落到「提醒」。
+    /// None（CLI serve 无面板打开）恒视为不在看
+    pub panel_focus: std::sync::Mutex<Option<(bool, std::time::Instant)>>,
     /// 接收侧取消后的拒收窗口：发送端 IP → 拒收截止时刻。
     /// 窗口内 prepare-upload 一律 204（官方协议的「拒收」语义，
     /// 我方发送端据此终止不重试），否则自动接受会让取消形同虚设
@@ -253,13 +258,45 @@ impl AppState {
         }
     }
 
-    /// 出站消息状态流转：sending → ok / fail
+    /// 面板是否正被看着（可见且聚焦，且 6 秒内仍在轮询上报）。
+    /// 通知静音判定：持续在报才静音——WebView 挂起 / 面板压根没开都算「不在看」
+    pub fn panel_watching(&self) -> bool {
+        self.panel_focus
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .map(|(f, at)| f && at.elapsed() < std::time::Duration::from_secs(6))
+            .unwrap_or(false)
+    }
+
+    /// 出站消息状态流转：sending → ok / fail。
+    /// 翻转即提醒时机：失败总是弹系统通知（面板不在看时）；成功只对
+    /// 「跑了一阵子的文件传输」提醒（>10s 的后台大件收工），小件与文本不打扰
     pub async fn set_msg_status(&self, id: u64, status: &str) {
         if id == 0 {
             return;
         }
         if let Err(e) = self.db.set_msg_status(id, status) {
             self.log_event(format!("消息 {id} 状态更新失败: {e:#}")).await;
+            return;
+        }
+        if self.panel_watching() {
+            return;
+        }
+        let Some(m) = self.db.get_msg(id) else { return };
+        if !m.out {
+            return;
+        }
+        let label = if m.kind == "text" {
+            crate::notify::preview(&m.text)
+        } else {
+            m.name.clone()
+        };
+        match status {
+            "fail" => crate::notify::outgoing(&m.peer_alias, &m.peer, &label, false),
+            "ok" if m.kind == "file" && now_ms().saturating_sub(m.at) > 10_000 => {
+                crate::notify::outgoing(&m.peer_alias, &m.peer, &label, true)
+            }
+            _ => {}
         }
     }
 

@@ -38,7 +38,6 @@ pub fn build_panel_router(state: Shared) -> Router {
         .route("/api/ui/state", get(ui_state))
         .route("/api/ui/send", post(ui_send))
         .route("/api/ui/send-text", post(ui_send_text))
-        .route("/api/ui/add", post(ui_add))
         .route("/api/ui/remove-device", post(ui_remove_device))
         .route("/api/ui/pick", post(ui_pick))
         .route("/api/ui/send-path", post(ui_send_path))
@@ -767,6 +766,10 @@ async fn finalize(
             .unwrap_or_else(|| peer.ip().to_string())
     };
     if let Some(content) = as_text {
+        // 系统通知：面板可能收在托盘里，横幅提醒；正被看着则静音
+        if !state.panel_watching() {
+            crate::notify::message(&sender_alias, &content);
+        }
         state
             .push_chat(crate::state::ChatMsg {
                 out: false,
@@ -780,6 +783,10 @@ async fn finalize(
             .await;
         state.log_event("收到一段文字消息".to_string()).await;
     } else {
+        // 系统通知：同发送方 3 秒内连发（整夹）只弹第一条横幅
+        if !state.panel_watching() {
+            crate::notify::file(&sender_alias, &sender_fp, &file_name_final, got);
+        }
         state
             .received
             .lock()
@@ -943,7 +950,15 @@ async fn dashboard() -> Html<&'static str> {
 /// 在线判定：多播周期 120s，300s 未见视为离线（列表仍保留，只是置灰）
 const ONLINE_MS: u64 = 300_000;
 
-async fn ui_state(State(state): State<Shared>) -> Response {
+#[derive(Deserialize)]
+struct UiStateQuery {
+    /// 面板焦点捎带上报：1 = 可见且聚焦（节点静音系统通知），0/缺省 = 不在看
+    focused: Option<u8>,
+}
+
+async fn ui_state(State(state): State<Shared>, Query(q): Query<UiStateQuery>) -> Response {
+    *state.panel_focus.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((q.focused.unwrap_or(0) == 1, std::time::Instant::now()));
     let id = &state.identity;
     let devices: Vec<serde_json::Value> = {
         let devices = state.devices.lock().await;
@@ -1284,13 +1299,6 @@ async fn ui_send_text(State(state): State<Shared>, axum::Json(body): axum::Json<
     }
 }
 
-#[derive(Deserialize)]
-struct UiAdd {
-    ip: String,
-    #[serde(default = "default_port")]
-    port: u16,
-}
-
 /// 取消出站传输：置取消标志，client::send 的轮次/块循环感知后自行终止。
 /// 消息状态由发送循环退出时统一落 fail（重试 = 断点续传）
 async fn ui_cancel_send(State(state): State<Shared>) -> Response {
@@ -1320,44 +1328,6 @@ async fn ui_cancel_rx(State(state): State<Shared>) -> Response {
         ))
         .await;
     Json(json!({ "ok": true })).into_response()
-}
-
-/// 手动添加设备：GET 对方 /info 拿指纹与别名
-async fn ui_add(State(state): State<Shared>, axum::Json(body): axum::Json<UiAdd>) -> Response {
-    let url = format!("https://{}:{}/api/localsend/v2/info", body.ip, body.port);
-    match http_client().get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
-        Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
-            Ok(v) => {
-                let fingerprint = v
-                    .get("fingerprint")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if fingerprint.is_empty() {
-                    return err_json(StatusCode::BAD_GATEWAY, "对方未返回指纹");
-                }
-                let device = Device {
-                    fingerprint: fingerprint.clone(),
-                    alias: v.get("alias").and_then(|x| x.as_str()).unwrap_or("未知").to_string(),
-                    ip: body.ip.parse().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
-                    port: body.port,
-                    https: true,
-                    device_model: v.get("deviceModel").and_then(|x| x.as_str()).map(str::to_string),
-                    device_type: v.get("deviceType").and_then(|x| x.as_str()).map(str::to_string),
-                    version: v.get("version").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
-                    download: v.get("download").and_then(|x| x.as_bool()).unwrap_or(false),
-                    last_seen: now_ms(),
-                };
-                let alias = device.alias.clone();
-                state.upsert_device(device).await;
-                state.log_event(format!("手动添加设备「{alias}」")).await;
-                Json(json!({"ok": true, "alias": alias})).into_response()
-            }
-            Err(_) => err_json(StatusCode::BAD_GATEWAY, "对方 info 响应异常"),
-        },
-        Ok(r) => err_json(StatusCode::BAD_GATEWAY, &format!("对方返回 {}", r.status())),
-        Err(e) => err_json(StatusCode::BAD_GATEWAY, &format!("连不上 {url}: {e}")),
-    }
 }
 
 #[derive(Deserialize)]
@@ -1776,6 +1746,7 @@ pub fn new_state(identity: crate::config::Identity) -> anyhow::Result<Shared> {
         rx_name: Default::default(),
         rx_write: Default::default(),
         send_cancel: std::sync::atomic::AtomicBool::new(false),
+        panel_focus: Default::default(),
         declined: Default::default(),
     }))
 }

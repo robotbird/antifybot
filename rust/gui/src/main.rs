@@ -58,7 +58,9 @@ fn main() {
             #[cfg(target_os = "macos")]
             let window = window
                 .title_bar_style(tauri::TitleBarStyle::Overlay)
-                .hidden_title(true);
+                .hidden_title(true)
+                // 与网页工具栏（44px）的中线一致；x 与失焦灰色占位灯同步。
+                .traffic_light_position(tauri::LogicalPosition::new(8.0, 21.0));
             window.build()?;
 
             // 5) 系统托盘：左键点图标切换窗口显隐，菜单提供「显示面板 / 退出」

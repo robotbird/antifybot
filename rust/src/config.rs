@@ -47,7 +47,8 @@ impl Identity {
         let mut saved_dir = None;
         if let Ok(text) = std::fs::read_to_string(&cfg_path) {
             if let Ok(c) = serde_json::from_str::<ConfigFile>(&text) {
-                saved_alias = Some(c.alias);
+                // 旧版默认别名带 " 🐜" 后缀，读取时剥掉（与保存值不同即触发回写迁移）
+                saved_alias = Some(c.alias.trim_end_matches(" 🐜").to_string());
                 saved_dir = c.download_dir.filter(|s| !s.trim().is_empty());
             }
         }
@@ -173,12 +174,39 @@ fn cert_fingerprint(pem: &[u8]) -> Result<String> {
 }
 
 fn default_alias() -> String {
+    // 优先系统「电脑名称」（macOS ComputerName，如「叶鹏的MacBook Air」），比
+    // mDNS 主机名（xiepengdeMacBook-Air）更贴近用户认知；取不到回退主机名
+    if let Some(pretty) = os_pretty_name() {
+        let t = pretty.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
     let host = gethostname::gethostname()
         .to_str()
         .map(|s| s.to_string())
         .unwrap_or_else(|| "Antify".to_string());
-    let short = host.split('.').next().unwrap_or("Antify").to_string();
-    format!("{short} 🐜")
+    host.split('.').next().unwrap_or("Antify").to_string()
+}
+
+/// 系统级设备名：macOS 走 `scutil --get ComputerName`；Windows 取 %COMPUTERNAME%；
+/// 其余平台返回 None（调用方回退主机名）
+fn os_pretty_name() -> Option<String> {
+    if cfg!(target_os = "macos") {
+        let out = std::process::Command::new("scutil")
+            .args(["--get", "ComputerName"])
+            .output()
+            .ok()?;
+        if out.status.success() {
+            Some(String::from_utf8_lossy(&out.stdout).into_owned())
+        } else {
+            None
+        }
+    } else if cfg!(target_os = "windows") {
+        std::env::var("COMPUTERNAME").ok()
+    } else {
+        None
+    }
 }
 
 fn pretty_os() -> &'static str {

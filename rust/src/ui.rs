@@ -14,7 +14,8 @@
 //! 关于（版本 / 检查更新 / 节点信息）；主题三态 + 中英文界面，localStorage 持久化。
 //! 拖文件到窗口任意位置即可发送：设备行定向投放优先，其余位置按 当前会话 → 唯一设备 → 弹窗选择
 //! 解析目标；拖动中全窗 accent 内描边高亮 + 顶部胶囊提示目标。
-//! 事件以 toast 呈现。
+//! 事件以 toast 呈现；消息 / 文件到达与出站成败另发系统通知
+//! （面板聚焦时轮询捎带静音；收托盘 / 切后台自动恢复提醒）。
 pub const DASHBOARD: &str = r##"<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -24,9 +25,12 @@ pub const DASHBOARD: &str = r##"<!doctype html>
 <style>
   /* ── 主题变量：默认浅色；显式深色 data-theme="dark"；系统深色但未锁定浅色时同样取深色 ── */
   :root{
+    color-scheme:light;
     --bg:#f7f7f8; --card:#ffffff; --ink:#202124; --muted:#74777d;
     --line:rgba(0,0,0,.08); --line-strong:rgba(0,0,0,.13);
     --accent:#3979e8; --accent-deep:#2466cf;
+    /* 设定页的保存操作沿用界面既有主蓝色，不随深色主题的橙色强调色切换。 */
+    --ui-blue:#3979e8; --ui-blue-deep:#2466cf;
     --accent-soft:rgba(57,121,232,.11); --ok:#34a853; --err:#d84b52;
     /* 侧栏：ChatGPT 式浅暖灰，比主区深半档 */
     --side:#f0f0f1; --side-ink:#24262a; --side-muted:#777a80;
@@ -35,12 +39,14 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     /* 会话区（ChatGPT 式）：纯白消息区、灰底出站气泡、白底输入盒 */
     --chat-bg:#ffffff; --bub-out:#f0f0f0; --comp:#ffffff;
     --soft:rgba(0,0,0,.055); --soft-hover:rgba(0,0,0,.10);
+    --scroll-track:transparent; --scroll-thumb:rgba(80,82,88,.32); --scroll-thumb-hover:rgba(80,82,88,.48);
     --shadow:0 1px 2px rgba(0,0,0,.03), 0 12px 32px -20px rgba(0,0,0,.28);
     --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",
            "PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
     --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
   }
   :root[data-theme="dark"]{
+    color-scheme:dark;
     --bg:#1a1a1c; --card:#232327; --ink:#f0f0f2; --muted:#9a9aa0;
     --line:rgba(255,255,255,.11); --line-strong:rgba(255,255,255,.16);
     --accent:#e8932c; --accent-deep:#f0a64e;
@@ -50,10 +56,12 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     --side-sel:rgba(255,255,255,.09);
     --chat-bg:#212121; --bub-out:#303030; --comp:#303030;
     --soft:rgba(255,255,255,.07); --soft-hover:rgba(255,255,255,.14);
+    --scroll-track:#212121; --scroll-thumb:rgba(255,255,255,.22); --scroll-thumb-hover:rgba(255,255,255,.34);
     --shadow:0 1px 2px rgba(0,0,0,.4), 0 16px 36px -20px rgba(0,0,0,.7);
   }
   @media(prefers-color-scheme:dark){
     :root:not([data-theme="light"]){
+      color-scheme:dark;
       --bg:#1a1a1c; --card:#232327; --ink:#f0f0f2; --muted:#9a9aa0;
       --line:rgba(255,255,255,.11); --line-strong:rgba(255,255,255,.16);
     --accent:#e8932c; --accent-deep:#f0a64e;
@@ -63,10 +71,16 @@ pub const DASHBOARD: &str = r##"<!doctype html>
       --side-sel:rgba(255,255,255,.09);
     --chat-bg:#212121; --bub-out:#303030; --comp:#303030;
       --soft:rgba(255,255,255,.07); --soft-hover:rgba(255,255,255,.14);
+      --scroll-track:#212121; --scroll-thumb:rgba(255,255,255,.22); --scroll-thumb-hover:rgba(255,255,255,.34);
       --shadow:0 1px 2px rgba(0,0,0,.4), 0 16px 36px -20px rgba(0,0,0,.7);
     }
   }
   *{box-sizing:border-box}
+  *{scrollbar-width:thin;scrollbar-color:var(--scroll-thumb) var(--scroll-track)}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-track{background:var(--scroll-track)}
+  ::-webkit-scrollbar-thumb{background:var(--scroll-thumb);border:3px solid var(--scroll-track);border-radius:999px}
+  ::-webkit-scrollbar-thumb:hover{background:var(--scroll-thumb-hover)}
   html,body{height:100%}
   body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
     line-height:1.5;overflow:hidden;-webkit-font-smoothing:antialiased;
@@ -76,7 +90,7 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .appchrome{display:grid;grid-template-columns:248px minmax(0,1fr);user-select:none;
     transition:grid-template-columns .26s cubic-bezier(.2,.8,.2,1)}
   .chrome-side,.chrome-main{display:flex;align-items:center;min-width:0}
-  .chrome-side{padding:0 14px;gap:10px;background:var(--side);border-right:1px solid var(--side-line)}
+  .chrome-side{position:relative;padding:0 14px;gap:10px;background:var(--side)}
   .sidebar-toggle{width:28px;height:28px;border:0;border-radius:8px;background:transparent;color:var(--side-muted);
     display:grid;place-items:center;cursor:pointer;transition:background .15s,color .15s}
   .sidebar-toggle:hover{background:var(--side-hover);color:var(--side-ink)}
@@ -87,13 +101,17 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .crumbs{display:flex;align-items:center;gap:8px;min-width:0;color:var(--muted);font-size:12.5px}
   .crumbs b{color:var(--ink);font-weight:680;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .chrome-context{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .crumb-sep{color:var(--side-muted);font-size:16px;font-weight:300}
-  .chrome-status{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:11.5px;white-space:nowrap}
-  .live-dot{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(52,168,83,.11)}
   .workspace{display:flex;min-height:0}
   /* Tauri on macOS overlays the native traffic lights onto this toolbar. */
   .is-macos .chrome-side{padding-left:76px}
-  .is-macos .sidebar-toggle{margin-top:-12px}
+  /* 与右侧标题共用工具栏中线；不要再额外上移切换按钮。 */
+  .is-macos .sidebar-toggle{margin-top:0}
+  /* 原生窗口失焦时，用与 Codex 一致的灰色交通灯覆盖系统的淡色状态。 */
+  /* 原生交通灯位于 overlay 标题栏的上方安全区，并不在 44px 工具栏的垂直中心。 */
+  .traffic-fallback{display:none;position:absolute;z-index:20;top:18px;left:8px;gap:8px;
+    pointer-events:none}
+  .traffic-fallback i{width:12px;height:12px;border-radius:50%;background:#d8d8da;border:1px solid rgba(0,0,0,.05)}
+  .is-macos body.window-inactive .traffic-fallback{display:flex}
   html.sidebar-collapsed .appchrome{grid-template-columns:64px minmax(0,1fr)}
   /* 收起后主区全宽，侧栏内容轻微淡出并滑离，不留可点击区域。 */
   html.sidebar-collapsed .side{width:0;opacity:0;pointer-events:none}
@@ -107,18 +125,7 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .side{width:248px;flex:none;overflow:hidden;background:var(--side);color:var(--side-ink);
     display:flex;flex-direction:column;transition:width .26s cubic-bezier(.2,.8,.2,1),opacity .16s ease}
   .side > *{transition:opacity .14s ease,transform .22s cubic-bezier(.2,.8,.2,1)}
-  .brand{display:flex;align-items:center;gap:8px;padding:17px 16px 12px;
-    font-weight:700;font-size:19px;letter-spacing:-.025em;color:var(--side-ink)}
-  .brand .bico{font-size:13px;line-height:1;color:var(--side-muted);transform:translateY(1px)}
-  .side-scroll{flex:1;overflow-y:auto;padding:4px 10px 10px}
-  .label{display:flex;align-items:center;gap:6px;padding:10px 8px 6px;
-    font-size:11.5px;font-weight:600;color:var(--side-muted);letter-spacing:.08em}
-  .label .n{font-weight:500;letter-spacing:0}
-  .label .lsp{flex:1}
-  .sbtn{width:26px;height:26px;border-radius:8px;border:none;background:transparent;
-    color:var(--side-muted);font-size:14px;line-height:1;display:grid;place-items:center;
-    cursor:pointer;transition:.15s}
-  .sbtn:hover{background:var(--side-hover);color:var(--side-ink)}
+  .side-scroll{flex:1;overflow-y:auto;padding:14px 10px 10px}
   /* 设备行：无描边、圆角 10px、选中浅灰底 */
   .dev{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:10px;
     cursor:pointer;transition:background .15s;outline:1.5px dashed transparent;
@@ -126,7 +133,11 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .dev:hover{background:var(--side-hover)}
   .dev:focus-visible{outline-color:var(--side-muted)}
   .dev.on{background:var(--side-sel)}
-  .dev .ico{font-size:20px;line-height:1;flex:none}
+  /* 头像式圆底：字标（SVG/emoji）在等大圆形浅底内呈现，视觉大小一致 */
+  .dev .ico{width:27px;height:27px;font-size:16px;line-height:1;flex:none;
+    display:grid;place-items:center;border-radius:50%;background:var(--soft);
+    color:var(--side-ink)}
+  .dev .ico svg{width:17px;height:17px;display:block}
   .dev .mid{min-width:0;flex:1}
   .dev .nm{font-size:13.5px;font-weight:600;color:var(--side-ink);
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -151,7 +162,7 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     font-family:var(--sans);font-size:13.5px;font-weight:600;cursor:pointer;
     transition:background .15s}
   .setrow:hover{background:var(--side-hover)}
-  .setrow .sic{font-size:1em;line-height:1;flex:none}
+  .setrow .sic{width:24px;height:24px;display:grid;place-items:center;font-size:24px;line-height:1;flex:none;transform:translateY(-1px)}
   .setrow .smid{flex:1;text-align:left;min-width:0;overflow:hidden;
     text-overflow:ellipsis;white-space:nowrap}
   .setrow .schev{color:inherit;font-size:13px;line-height:1}
@@ -169,7 +180,14 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .chead .cmeta{font-size:12px;color:var(--muted);min-width:0;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .cscroll{flex:1;min-height:0;overflow-y:auto}
+  .cscroll{flex:1;min-height:0;overflow-y:auto;background:var(--chat-bg);
+    scrollbar-color:var(--scroll-thumb) var(--chat-bg)}
+  .cscroll::-webkit-scrollbar{width:12px;background-color:var(--chat-bg)}
+  .cscroll::-webkit-scrollbar-track,.cscroll::-webkit-scrollbar-track-piece,
+  .cscroll::-webkit-scrollbar-corner{background-color:var(--chat-bg)!important}
+  .cscroll::-webkit-scrollbar-thumb{background-color:var(--scroll-thumb)!important;
+    border:3px solid var(--chat-bg)!important;border-radius:999px}
+  .cscroll::-webkit-scrollbar-thumb:hover{background-color:var(--scroll-thumb-hover)!important}
   body.dropping .cscroll{box-shadow:inset 0 0 0 1.5px var(--accent)}
   #chatlist{display:flex;flex-direction:column;gap:16px;padding:22px 26px;
     width:min(720px,100%);margin:0 auto}
@@ -307,6 +325,8 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     padding:9px 18px;cursor:pointer;border:1px solid transparent;transition:.15s}
   .btn.primary{background:var(--accent);color:#fff}
   .btn.primary:hover{background:var(--accent-deep)}
+  #set-dirsave{background:var(--ui-blue);color:#fff}
+  #set-dirsave:hover:not(:disabled){background:var(--ui-blue-deep)}
   .btn.ghost{background:var(--soft);color:var(--ink)}
   .btn.ghost:hover{background:var(--soft-hover)}
   .btn:disabled{opacity:.5;cursor:default}
@@ -332,6 +352,12 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .modalacts{display:flex;justify-content:flex-end;gap:9px;margin-top:16px}
   .chips-select{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
   /* 胶囊选择：默认描边、选中黑底白字（单色开关） */
+  /* 弹窗目标胶囊里的小圆底；.on 反色态下圆底换成互异色，图标仍清晰 */
+  .icochip{display:inline-grid;place-items:center;width:20px;height:20px;
+    border-radius:50%;background:var(--soft);color:var(--ink);
+    vertical-align:-5px;margin-right:5px}
+  .icochip svg{width:13px;height:13px;display:block}
+  .pick.on .icochip{background:var(--bg)}
   .pick{border:1px solid var(--line);background:transparent;border-radius:999px;
     padding:6px 14px;font-size:13px;cursor:pointer;color:var(--ink);font-family:var(--sans);
     transition:.15s}
@@ -393,14 +419,14 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   @media(max-width:760px){
     .app{grid-template-rows:40px minmax(0,1fr)}
     .appchrome{grid-template-columns:198px minmax(0,1fr)}
-    .chrome-side{padding:0 11px}.chrome-main{padding:0 14px}.chrome-status{display:none}
+    .chrome-side{padding:0 11px}.chrome-main{padding:0 14px}
     .side{width:198px}.center{padding:20px 16px}.chead{padding-inline:18px}.cfoot{padding-inline:16px}
   }
   @media(max-width:560px){
     .appchrome{grid-template-columns:minmax(0,1fr)}.chrome-main{display:none}
-    .side{width:64px}.brand span:not(.bico),.label,.dev .mid,.dev .xbtn,.sidefoot .smid,.sidefoot .schev,.navnote{display:none}
-    .chrome-side{justify-content:center;padding:0}.brand{justify-content:center;padding:14px 0 8px}.side-scroll{padding-inline:8px}
-    .dev{justify-content:center;padding:10px}.dev .ico{font-size:19px}.sidefoot{padding-inline:8px}.setrow{justify-content:center;padding:10px}
+    .side{width:64px}.dev .mid,.dev .xbtn,.sidefoot .smid,.sidefoot .schev,.navnote{display:none}
+    .chrome-side{justify-content:center;padding:0}.side-scroll{padding-inline:8px}
+    .dev{justify-content:center;padding:10px}.sidefoot{padding-inline:8px}.setrow{justify-content:center;padding:10px}
   }
 </style>
 <script>
@@ -417,20 +443,17 @@ try{
 <div class="app">
   <header class="appchrome" aria-label="应用工具栏">
     <div class="chrome-side">
+      <div class="traffic-fallback" aria-hidden="true"><i></i><i></i><i></i></div>
       <button class="sidebar-toggle" id="btn-sidebar" title="收起侧栏" aria-label="收起侧栏"><i aria-hidden="true"></i></button>
     </div>
     <div class="chrome-main">
-      <div class="crumbs"><span>局域网快传</span><span class="crumb-sep">/</span><b id="chrome-title">设备与会话</b><span class="chrome-context" id="chrome-context"></span></div>
-      <div class="chrome-status"><span class="live-dot" aria-hidden="true"></span><span>本机节点运行中</span><span id="chrome-addr"></span></div>
+      <div class="crumbs"><b id="chrome-title">设备与会话</b><span class="chrome-context" id="chrome-context"></span></div>
     </div>
   </header>
   <div class="workspace">
 
   <aside class="side">
-    <div class="brand"><span class="brand-name">AntifyBot</span></div>
     <div class="side-scroll">
-      <div class="label"><span data-t="devices">设备</span><span class="n" id="devcount"></span><span class="lsp"></span>
-        <button class="sbtn" id="btn-add" data-tt="addDevice" title="手动添加设备（IP）">＋</button></div>
       <div id="devices"></div>
       <div class="devempty" id="devempty"><span data-t="devEmpty">等待设备上线</span><br><small data-t="devEmptySub">同一网络下自动发现</small></div>
     </div>
@@ -515,17 +538,6 @@ try{
   <div class="modalacts">
     <button class="btn ghost" id="textcancel" data-t="cancel">取消</button>
     <button class="btn primary" id="textsend" data-t="sendBtn">发送</button>
-  </div>
-</dialog>
-
-<dialog id="adddlg">
-  <h3 data-t="addDeviceT">手动添加设备</h3>
-  <div class="field"><label data-t="ipAddr">IP 地址</label>
-    <input type="text" id="ip" placeholder="192.168.1.5" autocomplete="off"></div>
-  <div class="field"><label data-t="portL">端口</label><input type="number" id="port" value="53317"></div>
-  <div class="modalacts">
-    <button class="btn ghost" id="addcancel" data-t="cancel">取消</button>
-    <button class="btn primary" id="addok" data-t="add">添加</button>
   </div>
 </dialog>
 
@@ -623,13 +635,13 @@ const esc = s => String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;'
 const L = {
   zh: {
     app:'蚂蚁快传', devices:'设备', settings:'设置',
-    addDevice:'手动添加设备（IP）', devEmpty:'等待设备上线', devEmptySub:'同一网络下自动发现',
+    devEmpty:'等待设备上线', devEmptySub:'同一网络下自动发现',
     removeDev:'从列表移除',
     inputPh:'输入消息，Enter 发送…',
     sendFile:'选择文件发送', sendFolder:'选择文件夹发送（全部文件）',
     sendClip:'发送剪贴板内容（截图 / 文本）', send:'发送',
     previewImg:'[图片]', offline:'离线', offlineLastSeen:'离线 · 最后可见 {0}', seenAgo:'{0}可见',
-    devCount:'在线 {0}/{1}', devEmptyMeta:'{0} · {1}',
+    devEmptyMeta:'{0} · {1}',
     selfTag:'本机', selfName:'{0}（本机）',
     selfNoFiles:'本机会话不支持发送文件 / 文件夹',
     chatHint1:'与「{0}」的对话会显示在这里',
@@ -647,8 +659,7 @@ const L = {
     dropSendTo:'松开即发送给「{0}」', dropPick:'松开后选择发送对象', dropNoDev:'暂无设备可发送',
     sendTo:'发送给谁？', cancel:'取消', sendBtn:'发送',
     sendTextT:'发送文本', textPh:'输入要发送的文本…',
-    addDeviceT:'手动添加设备', ipAddr:'IP 地址', portL:'端口', add:'添加',
-    ipRequired:'请填 IP', added:'已添加：{0}', addFail:'添加失败',
+    portL:'端口',
     noDevices:'还没有可用设备', sendingN:'开始发送 {0} 个文件', folderEmpty:'文件夹里没有可发送的文件',
     clipEmpty:'剪贴板里没有可发送的内容',
     clipDenied:'无法读取剪贴板，可直接 ⌘/Ctrl+V 粘贴', clipImgName:'剪贴板图片',
@@ -674,13 +685,13 @@ const L = {
   },
   en: {
     app:'AntifyBot', devices:'Devices', settings:'Settings',
-    addDevice:'Add device manually (IP)', devEmpty:'Waiting for devices', devEmptySub:'Auto-discovered on this network',
+    devEmpty:'Waiting for devices', devEmptySub:'Auto-discovered on this network',
     removeDev:'Remove from list',
     inputPh:'Type a message and press Enter…',
     sendFile:'Choose files to send', sendFolder:'Choose a folder (all files)',
     sendClip:'Send clipboard (screenshot / text)', send:'Send',
     previewImg:'[Image]', offline:'Offline', offlineLastSeen:'Offline · last seen {0}', seenAgo:'seen {0}',
-    devCount:'{0}/{1} online', devEmptyMeta:'{0} · {1}',
+    devEmptyMeta:'{0} · {1}',
     selfTag:'This device', selfName:'{0} (This device)',
     selfNoFiles:"Can't send files or folders to this device",
     chatHint1:'Your conversation with {0} will appear here',
@@ -698,8 +709,7 @@ const L = {
     dropSendTo:'Drop to send to "{0}"', dropPick:'Drop, then choose a recipient', dropNoDev:'No device to send to',
     sendTo:'Send to whom?', cancel:'Cancel', sendBtn:'Send',
     sendTextT:'Send text', textPh:'Text to send…',
-    addDeviceT:'Add device manually', ipAddr:'IP address', portL:'Port', add:'Add',
-    ipRequired:'Enter an IP address', added:'Added: {0}', addFail:'Add failed',
+    portL:'Port',
     noDevices:'No devices yet', sendingN:'Sending {0} files', folderEmpty:'No sendable files in that folder',
     clipEmpty:'Clipboard has nothing to send',
     clipDenied:"Can't read clipboard; paste with ⌘/Ctrl+V instead", clipImgName:'clipboard-image',
@@ -759,6 +769,19 @@ const fmtAgo = ms => {
     :new Date(Date.now()-ms).toLocaleDateString('en-US');
 };
 const fmtTime = ms => new Date(ms).toLocaleTimeString(LOCALE(),{hour12:false});
+// UI 上不展示设备别名末尾的品牌蚂蚁标记，协议/数据库仍保留原始别名。
+const displayAlias = alias => String(alias || '').replace(/\s*🐜\uFE0F?\s*$/u, '').trim();
+// 端口可能暂未上报；此时仅显示 IP，绝不把 undefined 渲染到界面上。
+const formatAddress = (ip, port) => {
+  const host = String(ip ?? '').trim();
+  const p = port == null ? '' : String(port).trim();
+  return host && p ? `${host}:${p}` : host;
+};
+// Tauri 的原生交通灯在失焦时会淡到几乎不可见；同步一个灰色覆盖层。
+const syncWindowFocus = () => document.body.classList.toggle('window-inactive', !document.hasFocus());
+window.addEventListener('focus', syncWindowFocus);
+window.addEventListener('blur', syncWindowFocus);
+syncWindowFocus();
 // 图片判定（与服务端 /api/ui/asset 的扩展名白名单保持一致）
 const IMG_RE = /\.(png|jpe?g|jfif|gif|webp|bmp|heic|heif|avif)$/i;
 const isImg = n => IMG_RE.test(String(n || ''));
@@ -817,13 +840,31 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !lb.hidden){ lb.hidden = true; lbimg.src = ''; }
 });
 
+// 系统品牌图标（设备行 .ico 与目标选择胶囊共用）：mac 为 Apple 标志剪影（iconfont），
+// currentColor 随主题文字色；Windows 为微软四格标，微软品牌蓝。deviceModel 是官方 App
+// 桌面端固定上报的 "macOS"/"Windows"/"Linux"（AntifyBot 对端为 "macOS (antify-rs)" 等），
+// 别名兜底（官方允许自定义 deviceModel）
+const ICO_MAC = '<svg viewBox="130 92 725 842" aria-hidden="true"><path fill="currentColor" d="M849.124134 704.896288c-1.040702 3.157923-17.300015 59.872622-57.250912 118.190843-34.577516 50.305733-70.331835 101.018741-126.801964 101.909018-55.532781 0.976234-73.303516-33.134655-136.707568-33.134655-63.323211 0-83.23061 32.244378-135.712915 34.110889-54.254671 2.220574-96.003518-54.951543-130.712017-105.011682-70.934562-102.549607-125.552507-290.600541-52.30118-416.625816 36.040844-63.055105 100.821243-103.135962 171.364903-104.230899 53.160757-1.004887 103.739712 36.012192 136.028093 36.012192 33.171494 0 94.357018-44.791136 158.90615-38.089503 27.02654 1.151219 102.622262 11.298324 151.328567 81.891102-3.832282 2.607384-90.452081 53.724599-89.487104 157.76107C739.079832 663.275355 847.952448 704.467523 849.124134 704.896288M633.69669 230.749408c29.107945-35.506678 48.235584-84.314291 43.202964-132.785236-41.560558 1.630127-92.196819 27.600615-122.291231 62.896492-26.609031 30.794353-50.062186 80.362282-43.521213 128.270409C557.264926 291.935955 604.745311 264.949324 633.69669 230.749408"/></svg>';
+const ICO_WIN = '<svg viewBox="0 0 1024 1024" aria-hidden="true"><path fill="#0078D7" d="M0 139.392L409.429333 81.92l0.170667 407.210667-409.216 2.389333L0 139.392z m409.301333 395.818667L409.6 942.08 0 884.181333V532.48l409.301333 2.730667z m41.258667-454.186667L1024 0v487.125333l-573.44 4.394667V81.024zM1024 533.333333L1023.872 1024l-572.501333-79.274667-0.810667-412.245333 573.44 0.896z"/></svg>';
+// 本机行：面板跑在宿主机上，UA 即宿主系统
+const SELF_ICON = /windows/i.test(navigator.userAgent) ? ICO_WIN
+  : /mac/i.test(navigator.userAgent) ? ICO_MAC : '🖥️';
+
 function emoji(d){
   const t = d.deviceType || '', m = (d.deviceModel||'') + (d.alias||'');
   if (t === 'mobile' || /iPhone|iPad|手机/i.test(m)) return '📱';
   if (t === 'web') return '🌐';
   if (t === 'server') return '🖧';
-  if (/Mac|笔记本|laptop/i.test(m)) return '💻';
   return '🖥️';
+}
+function devIcon(d){
+  const mo = d.deviceModel || '';
+  if (/mac/i.test(mo)) return ICO_MAC;
+  if (/win/i.test(mo)) return ICO_WIN;
+  const a = d.alias || '';
+  if (/mac|苹果/i.test(a)) return ICO_MAC;
+  if (/windows|win|pc|电脑/i.test(a)) return ICO_WIN;
+  return emoji(d);
 }
 
 function hasFiles(e){
@@ -835,11 +876,9 @@ function render(s){
   const me = s.me || {};
   const selfFp = me.fingerprint || '';
   const selfIps = me.ips || [];
-  // 本机地址串（右侧顶栏 / 自我会话头部展示）
-  const selfAddr0 = selfIps.length ? selfIps[0] + ':' + me.port : '';
-  const selfAddrs = selfIps.map(ip => ip + ':' + me.port);
-  $('chrome-addr').textContent = selfAddr0 ? ' · ' + selfAddr0 : '';
-  $('chrome-addr').title = selfAddrs.join('\n');
+  // 本机地址串（自我会话与左侧本机设备项展示）
+  const selfAddrs = selfIps.map(ip => formatAddress(ip, me.port)).filter(Boolean);
+  const selfAddr0 = selfAddrs[0] || '';
 
   // ── 侧栏设备（内容有变化才重绘，避免打断 hover / 拖放；key 含语言，切语言强制重绘） ──
   // 会话列表式：第二行显示与该设备的最近一条消息预览；离线设备置灰保留；
@@ -857,21 +896,15 @@ function render(s){
     const box = $('devices');
     box.innerHTML = '';
     $('devempty').hidden = s.devices.length > 0;
-    const onlineN = s.devices.filter(d => d.online).length;
-    $('devcount').textContent = s.devices.length
-      ? '· ' + t('devCount', onlineN, s.devices.length) : '';
     if (selfFp){
       const row = document.createElement('div');
       row.className = 'dev' + (sel === selfFp ? ' on' : '');
       row.dataset.fp = selfFp; row.tabIndex = 0; row.title = t('selfName', me.alias);
-      const ico = document.createElement('div'); ico.className = 'ico'; ico.textContent = '🖥️';
+      const ico = document.createElement('div'); ico.className = 'ico'; ico.innerHTML = SELF_ICON;
       const mid = document.createElement('div'); mid.className = 'mid';
       const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = t('selfName', me.alias);
       const meta = document.createElement('div'); meta.className = 'meta';
-      const lm = lastByFp[selfFp];
-      const preview = lm && lm.kind === 'text'
-        ? lm.text.replace(/\s+/g, ' ').slice(0, 42) : '';
-      meta.textContent = preview || selfAddr0 || ('127.0.0.1:' + me.port);
+      meta.textContent = selfAddr0 || formatAddress('127.0.0.1', me.port);
       mid.append(nm, meta);
       row.append(ico, mid);
       row.onclick = () => { sel = (sel === selfFp ? null : selfFp); syncSel(); };
@@ -887,20 +920,12 @@ function render(s){
     for (const d of s.devices){
       const row = document.createElement('div');
       row.className = 'dev' + (d.fingerprint === sel ? ' on' : '') + (d.online ? '' : ' off');
-      row.dataset.fp = d.fingerprint; row.tabIndex = 0; row.title = d.alias;
-      const ico = document.createElement('div'); ico.className = 'ico'; ico.textContent = emoji(d);
+      row.dataset.fp = d.fingerprint; row.tabIndex = 0; row.title = displayAlias(d.alias);
+      const ico = document.createElement('div'); ico.className = 'ico'; ico.innerHTML = devIcon(d);
       const mid = document.createElement('div'); mid.className = 'mid';
-      const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = d.alias;
+      const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = displayAlias(d.alias);
       const meta = document.createElement('div'); meta.className = 'meta';
-      const lm = lastByFp[d.fingerprint];
-      const preview = lm
-        ? (lm.kind === 'text'
-            ? lm.text.replace(/\s+/g, ' ').slice(0, 42)
-            : (isImg(lm.name) ? t('previewImg') : '📄 ' + lm.name))
-        : '';
-      meta.textContent = d.online
-        ? (preview || t('devEmptyMeta', d.deviceType || '?', d.ip))
-        : (preview ? t('offline') + ' · ' + preview : t('offlineLastSeen', fmtAgo(d.lastSeenMs)));
+      meta.textContent = formatAddress(d.ip, d.port);
       mid.append(nm, meta);
       const x = document.createElement('button'); x.className = 'xbtn';
       x.textContent = '✕'; x.title = t('removeDev');
@@ -1012,19 +1037,19 @@ function renderCenter(s){
   $('btn-cfile').disabled = isSelf;
   $('btn-cfolder').disabled = isSelf;
   if (d){
-    let meta;
+    let meta, alias;
     if (isSelf){
-      const addrs = (me.ips||[]).map(ip => ip + ':' + me.port);
-      meta = addrs.length ? addrs.join(' · ') : ('127.0.0.1:' + me.port);
-      $('ch-name').textContent = me.alias + ' · ' + t('selfTag');
+      const addrs = (me.ips||[]).map(ip => formatAddress(ip, me.port)).filter(Boolean);
+      meta = addrs.length ? addrs.join(' · ') : formatAddress('127.0.0.1', me.port);
+      alias = displayAlias(me.alias);
+      $('ch-name').textContent = alias;
     } else {
-      $('ch-name').textContent = d.alias;
-      meta = d.online
-        ? t('devEmptyMeta', d.deviceType || '?', d.ip) + ' · ' + t('seenAgo', fmtAgo(d.lastSeenMs))
-        : t('offlineLastSeen', fmtAgo(d.lastSeenMs));
+      alias = displayAlias(d.alias);
+      $('ch-name').textContent = alias;
+      meta = formatAddress(d.ip, d.port);
     }
     $('ch-meta').textContent = meta;
-    $('chrome-title').textContent = d.alias;
+    $('chrome-title').textContent = alias;
     $('chrome-context').textContent = meta;
   } else {
     $('chrome-title').textContent = t('devices');
@@ -1164,7 +1189,9 @@ function syncSel(){
 
 async function poll(){
   try{
-    const r = await fetch('/api/ui/state');
+    // 捎带焦点上报：可见且聚焦 → 节点静音系统通知（收托盘 / 切后台后停报，~6s 自动恢复提醒）
+    const watching = document.visibilityState === 'visible' && document.hasFocus() ? 1 : 0;
+    const r = await fetch('/api/ui/state?focused=' + watching);
     if (r.ok) render(await r.json());
   }catch(_){ /* 服务重启中 */ }
   setTimeout(poll, 1200);
@@ -1264,7 +1291,7 @@ function openPick(cb){
   list.innerHTML = '';
   for (const d of ds){
     const b = document.createElement('button'); b.className = 'pick';
-    b.textContent = `${emoji(d)} ${d.alias}`;
+    b.innerHTML = '<span class="icochip">' + devIcon(d) + '</span>' + esc(d.alias);
     b.onclick = () => { $('pickdlg').close(); cb(d.fingerprint); };
     list.appendChild(b);
   }
@@ -1376,7 +1403,7 @@ function openText(preselect){
   let cur = preselect || sel || (ds[0] && ds[0].fingerprint);
   const syncs = ds.map(d => {
     const b = document.createElement('button'); b.className = 'pick';
-    b.textContent = `${emoji(d)} ${d.alias}`;
+    b.innerHTML = '<span class="icochip">' + devIcon(d) + '</span>' + esc(d.alias);
     const sync = () => b.classList.toggle('on', cur === d.fingerprint);
     b.onclick = () => { cur = d.fingerprint; syncs.forEach(f => f()); };
     box.appendChild(b); sync();
@@ -1402,21 +1429,6 @@ function openText(preselect){
 }
 $('textcancel').onclick = () => $('textdlg').close();
 $('btn-text').onclick = () => openText(null);
-
-// 手动添加
-$('btn-add').onclick = () => $('adddlg').showModal();
-$('addcancel').onclick = () => $('adddlg').close();
-$('addok').onclick = async () => {
-  const ip = $('ip').value.trim(), port = +$('port').value || 53317;
-  if (!ip) return toast(t('ipRequired'), true);
-  try{
-    const r = await fetch('/api/ui/add', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({ip, port})});
-    const v = await r.json().catch(()=>({}));
-    if (r.ok){ toast(t('added', v.alias)); $('adddlg').close(); $('ip').value=''; }
-    else toast(v.error || t('addFail'), true);
-  }catch(e){ toast(t('addFail')+'：'+e.message, true); }
-};
 
 // 重试未送达的消息（服务端校验可重试性：文本或有源路径的文件；返回后状态经轮询刷新）
 async function retryMsg(m){

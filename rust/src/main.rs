@@ -27,7 +27,7 @@ enum Cmd {
         /// HTTPS 端口（默认 53317，LocalSend 标准）
         #[arg(long)]
         port: Option<u16>,
-        /// 设备别名（默认 主机名 🐜）
+        /// 设备别名（默认 主机名）
         #[arg(long)]
         alias: Option<String>,
         /// 接收文件的保存目录（默认 ~/Downloads/AntifyBot）
