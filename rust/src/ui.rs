@@ -106,6 +106,8 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .is-macos .chrome-side{padding-left:76px}
   /* 与右侧标题共用工具栏中线；不要再额外上移切换按钮。 */
   .is-macos .sidebar-toggle{margin-top:0}
+  /* Windows 有自己的原生标题栏：切换入口与设备图标共用 20px 左侧对齐线。 */
+  .is-windows .chrome-side{justify-content:flex-start;padding-left:20px}
   /* 原生窗口失焦时，用与 Codex 一致的灰色交通灯覆盖系统的淡色状态。 */
   /* 原生交通灯位于 overlay 标题栏的上方安全区，并不在 44px 工具栏的垂直中心。 */
   .traffic-fallback{display:none;position:absolute;z-index:20;top:18px;left:8px;gap:8px;
@@ -435,6 +437,7 @@ try{
   var _th = localStorage.getItem('antify-theme');
   if (_th === 'light' || _th === 'dark') document.documentElement.dataset.theme = _th;
   if (navigator.userAgent.includes('Macintosh')) document.documentElement.classList.add('is-macos');
+  if (/windows/i.test(navigator.userAgent)) document.documentElement.classList.add('is-windows');
   if (localStorage.getItem('antify-sidebar') === 'collapsed') document.documentElement.classList.add('sidebar-collapsed');
 }catch(_){}
 </script>

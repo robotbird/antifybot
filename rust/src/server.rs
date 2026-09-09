@@ -1591,7 +1591,9 @@ struct UiReveal {
 }
 
 async fn ui_reveal(State(state): State<Shared>, axum::Json(body): axum::Json<UiReveal>) -> Response {
-    let canon = if let Some(id) = body.message_id {
+    // 接收文件的「打开文件夹」语义是打开当前设置的存储位置，而不是依赖某条
+    // 历史消息推导文件路径。这样修改保存位置后，入口始终与设置页一致。
+    let (canon, reveal_file) = if let Some(id) = body.message_id {
         // 只能打开 SQLite 中这条已发送文件消息登记过的源路径。
         let Some(msg) = state.db.get_msg(id) else {
             return err_json(StatusCode::NOT_FOUND, "消息不存在");
@@ -1602,32 +1604,35 @@ async fn ui_reveal(State(state): State<Shared>, axum::Json(body): axum::Json<UiR
         let Ok(path) = std::path::PathBuf::from(msg.src_path).canonicalize() else {
             return err_json(StatusCode::NOT_FOUND, "源文件已不存在");
         };
-        path
+        (path, true)
     } else {
-        let Some(file) = body.file else {
+        let Some(_file) = body.file else {
             return err_json(StatusCode::BAD_REQUEST, "缺少文件路径");
         };
         let dl = state.download_dir.read().await.clone();
         let dir = dl.canonicalize().unwrap_or(dl);
-        let Ok(path) = dir.join(file).canonicalize() else {
-            return err_json(StatusCode::FORBIDDEN, "路径越界");
-        };
-        // 已接收文件必须仍位于受控下载目录，挡住 .. 穿越。
-        if !path.starts_with(&dir) {
-            return err_json(StatusCode::FORBIDDEN, "路径越界");
-        }
-        path
+        (dir, false)
     };
     #[cfg(target_os = "macos")]
-    let ok = std::process::Command::new("open").arg("-R").arg(&canon).spawn().is_ok();
+    let ok = {
+        let mut cmd = std::process::Command::new("open");
+        if reveal_file {
+            cmd.arg("-R");
+        }
+        cmd.arg(&canon).spawn().is_ok()
+    };
     #[cfg(target_os = "windows")]
-    let ok = std::process::Command::new("explorer")
-        .arg(format!("/select,{}", canon.display()))
-        .spawn()
-        .is_ok();
+    let ok = if reveal_file {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", canon.display()))
+            .spawn()
+            .is_ok()
+    } else {
+        std::process::Command::new("explorer").arg(&canon).spawn().is_ok()
+    };
     #[cfg(all(unix, not(target_os = "macos")))]
     let ok = std::process::Command::new("xdg-open")
-        .arg(canon.parent().unwrap_or(&canon))
+        .arg(if reveal_file { canon.parent().unwrap_or(&canon) } else { &canon })
         .spawn()
         .is_ok();
     #[cfg(not(any(unix, target_os = "windows")))]
