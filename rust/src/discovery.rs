@@ -1,6 +1,7 @@
 //! UDP 多播发现：224.0.0.167:53317
 //! 收到他人公告 → 记入设备表 → 回一个 HTTP register（对方响应里带回它的最新信息）
-//! 自己启动时发公告爆发（100/500/2000ms × 3 包），之后每 2 分钟重发保持可见
+//! 自己启动时发公告爆发（100/500/2000ms × 3 包），之后每 5 秒发送心跳公告，
+//! 让设备下线能在 UI 的 10 秒窗口内被可靠标记。
 //!
 //! 接口热变化：Wi-Fi 漫游 / 热点重编号 / 虚拟机网桥启停都会让启动时枚举的地址失效
 //! （入组与出口接口都钉死在旧地址上，节点从此失聪）。因此每 15s 重枚举一次，
@@ -64,7 +65,8 @@ pub async fn start(state: Shared, client: reqwest::Client, multicast_port: Optio
     // 收到陌生公告时的"回敬公告"限流：避免多设备同时在线时风暴
     let last_reannounce = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    // 公告爆发 + 周期重发
+    // 启动爆发 + 低频心跳：5 秒小 UDP 包可支撑 10 秒离线判定，
+    // 又避免只依赖 LocalSend 默认的 120 秒公告周期。
     tokio::spawn({
         let state = state.clone();
         let socks = send_socks.clone();
@@ -74,7 +76,7 @@ pub async fn start(state: Shared, client: reqwest::Client, multicast_port: Optio
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                     announce_once(&state, &socks.read().await, group).await;
                 }
-                tokio::time::sleep(Duration::from_secs(120)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
     });

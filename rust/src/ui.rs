@@ -780,6 +780,10 @@ const formatAddress = (ip, port) => {
   const p = port == null ? '' : String(port).trim();
   return host && p ? `${host}:${p}` : host;
 };
+const deviceMeta = d => {
+  const address = formatAddress(d.ip, d.port);
+  return d.online ? address : [address, t('offline')].filter(Boolean).join(' · ');
+};
 // Tauri 的原生交通灯在失焦时会淡到几乎不可见；同步一个灰色覆盖层。
 const syncWindowFocus = () => document.body.classList.toggle('window-inactive', !document.hasFocus());
 window.addEventListener('focus', syncWindowFocus);
@@ -928,7 +932,7 @@ function render(s){
       const mid = document.createElement('div'); mid.className = 'mid';
       const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = displayAlias(d.alias);
       const meta = document.createElement('div'); meta.className = 'meta';
-      meta.textContent = formatAddress(d.ip, d.port);
+      meta.textContent = deviceMeta(d);
       mid.append(nm, meta);
       const x = document.createElement('button'); x.className = 'xbtn';
       x.textContent = '✕'; x.title = t('removeDev');
@@ -1049,7 +1053,7 @@ function renderCenter(s){
     } else {
       alias = displayAlias(d.alias);
       $('ch-name').textContent = alias;
-      meta = formatAddress(d.ip, d.port);
+      meta = deviceMeta(d);
     }
     $('ch-meta').textContent = meta;
     $('chrome-title').textContent = alias;
@@ -1520,7 +1524,48 @@ $('langpick').addEventListener('click', e => {
   applyLang(b.dataset.v);
 });
 
+// macOS 外部页面不总会收到声明式 data-tauri-drag-region 的注入事件；
+// 这里直接调用 Tauri 窗口接口。设备标题区按下即可拖动；侧栏按钮在移动超过
+// 4px 后才开始拖动，普通点击仍然保持展开/收起行为。
+let suppressSidebarToggleClick = false;
+function requestWindowDrag(){
+  if (!document.documentElement.classList.contains('is-macos')) return;
+  const invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke;
+  if (typeof invoke === 'function'){
+    Promise.resolve(invoke('plugin:window|start_dragging')).catch(() => {});
+    return;
+  }
+  const start = window.__TAURI__ && window.__TAURI__.window &&
+    window.__TAURI__.window.getCurrentWindow && window.__TAURI__.window.getCurrentWindow().startDragging;
+  if (typeof start === 'function') Promise.resolve(start()).catch(() => {});
+}
+const appChrome = document.querySelector('.appchrome');
+appChrome.addEventListener('mousedown', e => {
+  if (e.button !== 0 || !document.documentElement.classList.contains('is-macos')) return;
+  const toggle = e.target.closest('#btn-sidebar');
+  if (!toggle){
+    e.preventDefault();
+    requestWindowDrag();
+    return;
+  }
+  const startX = e.clientX, startY = e.clientY;
+  let started = false;
+  const clear = () => {
+    document.removeEventListener('mousemove', move);
+    if (started) setTimeout(() => { suppressSidebarToggleClick = false; }, 0);
+  };
+  const move = moveEvent => {
+    if (started || Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 4) return;
+    started = true;
+    suppressSidebarToggleClick = true;
+    requestWindowDrag();
+  };
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', clear, {once:true});
+});
+
 $('btn-sidebar').onclick = () => {
+  if (suppressSidebarToggleClick) return;
   const root = document.documentElement;
   root.classList.toggle('sidebar-collapsed');
   const collapsed = root.classList.contains('sidebar-collapsed');

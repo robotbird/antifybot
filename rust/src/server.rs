@@ -947,8 +947,9 @@ async fn dashboard() -> Html<&'static str> {
     Html(crate::ui::DASHBOARD)
 }
 
-/// 在线判定：多播周期 120s，300s 未见视为离线（列表仍保留，只是置灰）
-const ONLINE_MS: u64 = 300_000;
+/// 在线判定：AntifyBot 每 5 秒发送一次心跳；连续 10 秒未见即标为离线。
+/// 设备条目仍保留，方便继续查看聊天记录或等待其重新上线。
+const ONLINE_MS: u64 = 10_000;
 
 #[derive(Deserialize)]
 struct UiStateQuery {
