@@ -486,9 +486,10 @@ try{
             <button class="tool" id="btn-cfile" data-tt="sendFile" title="选择文件发送">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
             </button>
-            <button class="tool" id="btn-cfolder" data-tt="sendFolder" title="选择文件夹发送（全部文件）">
+            <button class="tool" id="btn-cfolder" data-tt="sendFolder" title="共享文件夹（只读、按需下载）">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
             </button>
+            <button class="tool" id="btn-shares" title="共享目录 / Shared folders">☷</button>
             <button class="tool" id="btn-cclip" data-tt="sendClip" title="发送剪贴板内容（截图 / 文本）">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>
             </button>
@@ -528,6 +529,17 @@ try{
 <input type="file" id="filepick" multiple style="display:none">
 <input type="file" id="folderpick" webkitdirectory multiple style="display:none">
 
+<dialog id="sharedlg" style="width:min(720px,90vw)">
+  <h3 id="sharetitle"></h3>
+  <div style="display:flex;gap:8px;margin-bottom:12px">
+    <input id="shareaddress" placeholder="antify-share://…" style="flex:1;min-width:0">
+    <button id="shareopen"></button><button id="sharemanage"></button><button id="shareclose">✕</button>
+  </div>
+  <div id="sharepath" style="overflow-wrap:anywhere;margin:10px 0"></div>
+  <div id="shareentries" style="max-height:48vh;overflow:auto"></div>
+  <div id="shareprogress" role="status" style="margin-top:12px;overflow-wrap:anywhere"></div>
+  <button id="sharepause"></button>
+</dialog>
 <dialog id="pickdlg">
   <h3 data-t="sendTo">发送给谁？</h3>
   <div class="chips-select" id="picklist"></div>
@@ -641,7 +653,7 @@ const L = {
     devEmpty:'等待设备上线', devEmptySub:'同一网络下自动发现',
     removeDev:'从列表移除',
     inputPh:'输入消息，Enter 发送…',
-    sendFile:'选择文件发送', sendFolder:'选择文件夹发送（全部文件）',
+    sendFile:'选择文件发送', sendFolder:'共享文件夹（只读、按需下载）',
     sendClip:'发送剪贴板内容（截图 / 文本）', send:'发送',
     previewImg:'[图片]', offline:'离线', offlineLastSeen:'离线 · 最后可见 {0}', seenAgo:'{0}可见',
     devEmptyMeta:'{0} · {1}',
@@ -691,7 +703,7 @@ const L = {
     devEmpty:'Waiting for devices', devEmptySub:'Auto-discovered on this network',
     removeDev:'Remove from list',
     inputPh:'Type a message and press Enter…',
-    sendFile:'Choose files to send', sendFolder:'Choose a folder (all files)',
+    sendFile:'Choose files to send', sendFolder:'Share a folder (read-only)',
     sendClip:'Send clipboard (screenshot / text)', send:'Send',
     previewImg:'[Image]', offline:'Offline', offlineLastSeen:'Offline · last seen {0}', seenAgo:'seen {0}',
     devEmptyMeta:'{0} · {1}',
@@ -1117,6 +1129,13 @@ function renderChat(s){
     const bub = document.createElement('div'); bub.className = 'bub';
     if (m.kind === 'text'){
       bub.textContent = m.text;
+      const share = (m.text || '').match(/antify-share:\/\/([a-fA-F0-9]{64})\/([a-fA-F0-9]{32})\b/);
+      if (share && !m.out){
+        const b = document.createElement('button'); b.className = 'rbtn';
+        b.textContent = shareText('browse');
+        b.onclick = () => openShare(share[0]);
+        bub.append(document.createElement('br'), b);
+      }
     } else {
       // 中性文件卡片（图片加载失败时的退路）
       const fillChip = () => {
@@ -1353,9 +1372,124 @@ $('folderpick').onchange = () => {
   pendingFolderTarget = null;
 };
 $('btn-cfolder').onclick = () => {
-  if (sel) pickNative('folder', sel);
-  else resolveTarget(fp => pickNative('folder', fp));
+  if (sel) publishFolder(sel);
+  else resolveTarget(publishFolder);
 };
+
+// Read-only folder mapping. No recursive enumeration/upload when publishing.
+const shareStrings = {
+  zh: {title:'只读文件夹共享',browse:'浏览共享目录',mine:'我的共享',open:'打开地址',
+    download:'下载 / 继续',up:'上一级',more:'下一页',pause:'暂停下载（保留断点）',
+    revoke:'撤销共享',empty:'空目录',path:'原生选择器不可用，请输入本机文件夹绝对路径',
+    confirm:'将只读共享此文件夹及其子目录。持有地址的设备可以读取其中所有常规文件（包括隐藏文件），直到你撤销共享。是否继续？',
+    saved:'已保存到：',failed:'下载失败，重新点击下载可续传：',revoked:'共享已撤销',
+    offline:'双方需要运行新版 AntifyBot，且共享方保持在线。'},
+  en: {title:'Read-only folder shares',browse:'Browse shared folder',mine:'My shares',open:'Open address',
+    download:'Download / resume',up:'Parent',more:'Next page',pause:'Pause (keep partial file)',
+    revoke:'Revoke',empty:'Empty directory',path:'Enter the absolute local folder path',
+    confirm:'Share this folder read-only? Anyone with the address can read all regular files, including hidden files, until revoked.',
+    saved:'Saved to: ',failed:'Download failed. Click download again to resume: ',revoked:'Share revoked',
+    offline:'Both devices need an updated AntifyBot. Keep the sharing device online.'}
+};
+function shareText(k){ return shareStrings[lang === 'en' ? 'en' : 'zh'][k]; }
+async function shareApi(path, body){
+  const r = await fetch('/api/ui/'+path, body === undefined ? {} : {
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const v = await r.json(); if (!r.ok) throw new Error(v.error || r.status); return v;
+}
+async function publishFolder(fp){
+  if (isSelfTarget(fp)) return toast(t('selfNoFiles'), true);
+  try {
+    let paths;
+    try { paths = (await shareApi('pick', {kind:'folder'})).paths; }
+    catch (_) { const p = prompt(shareText('path')); paths = p ? [p] : null; }
+    if (!paths || !paths.length || !confirm(shareText('confirm'))) return;
+    const v = await shareApi('shares', {path:paths[0]});
+    await shareApi('send-text', {target:fp,text:'📂 '+v.name+'\n'+v.address});
+    toast(shareText('offline'));
+  } catch(e) { toast(e.message, true); }
+}
+let currentShare = null, shareGeneration = 0;
+function showShares(){
+  $('sharetitle').textContent = shareText('title');
+  $('shareopen').textContent = shareText('open');
+  $('sharemanage').textContent = shareText('mine');
+  $('sharepause').textContent = shareText('pause');
+  if (!$('sharedlg').open) $('sharedlg').showModal();
+}
+async function openShare(address){
+  showShares(); $('shareaddress').value = address;
+  const m = address.trim().match(/^antify-share:\/\/([a-fA-F0-9]{64})\/([a-fA-F0-9]{32})$/);
+  if (!m) return toast('Invalid antify-share address', true);
+  currentShare = {target:m[1].toUpperCase(),token:m[2],path:'',cursor:''};
+  await renderShare();
+}
+function shareButton(text, callback){
+  const b = document.createElement('button'); b.className='rbtn'; b.textContent=text; b.onclick=callback; return b;
+}
+async function renderShare(){
+  if (!currentShare) return;
+  const generation = ++shareGeneration, q = {...currentShare};
+  const box = $('shareentries'); box.textContent = '…';
+  $('sharepath').textContent = '/'+q.path;
+  try {
+    const v = await shareApi('shares/browse',q);
+    if (generation !== shareGeneration) return;
+    box.textContent = '';
+    if (q.path) box.appendChild(shareButton('↑ '+shareText('up'), () => {
+      currentShare.path=q.path.split('/').slice(0,-1).join('/');currentShare.cursor='';renderShare();
+    }));
+    for (const entry of v.entries){
+      const row = document.createElement('div'); row.style.cssText='display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--line)';
+      const name = document.createElement('span'); name.textContent=(entry.directory?'📁 ':'📄 ')+entry.name;
+      name.style.cssText='flex:1;overflow-wrap:anywhere';
+      const path = q.path ? q.path+'/'+entry.name : entry.name;
+      row.append(name, shareButton(entry.directory?'→':shareText('download')+' · '+fmtSize(entry.size), () => {
+        if (entry.directory){ currentShare={...q,path,cursor:''};renderShare(); }
+        else pullShare({...q,path});
+      })); box.appendChild(row);
+    }
+    if (!v.entries.length) box.appendChild(document.createTextNode(shareText('empty')));
+    if (v.next) box.appendChild(shareButton(shareText('more'), () => {currentShare={...q,cursor:v.next};renderShare();}));
+  } catch(e) { if (generation === shareGeneration) box.textContent=e.message+' — '+shareText('offline'); }
+}
+async function pullShare(q){
+  try {
+    $('shareprogress').textContent = '… '+q.path;
+    const v = await shareApi('shares/pull',q);
+    $('shareprogress').textContent = shareText('saved')+v.file;
+    toast(shareText('saved')+v.file);
+  } catch(e) { $('shareprogress').textContent = shareText('failed')+e.message; }
+}
+async function manageShares(){
+  showShares(); ++shareGeneration; currentShare=null;
+  $('shareentries').textContent='…'; $('sharepath').textContent=shareText('mine');
+  try {
+    const v = await shareApi('shares'); $('shareentries').textContent='';
+    for (const s of v.shares){
+      const row = document.createElement('div'); row.style.cssText='padding:10px 0;overflow-wrap:anywhere';
+      const address='antify-share://'+window._state.me.fingerprint+'/'+s.token;
+      const label=document.createElement('div'); label.textContent=s.path;
+      const link=document.createElement('div'); link.textContent=address;
+      row.append(label,link,shareButton(shareText('revoke'), async () => {
+        try { await shareApi('shares/revoke',{token:s.token});toast(shareText('revoked'));manageShares(); }
+        catch(e){toast(e.message,true);}
+      })); $('shareentries').appendChild(row);
+    }
+  } catch(e){$('shareentries').textContent=e.message;}
+}
+$('btn-shares').onclick=manageShares;
+$('sharemanage').onclick=manageShares;
+$('shareopen').onclick=() => openShare($('shareaddress').value);
+$('shareclose').onclick=() => $('sharedlg').close();
+$('sharepause').onclick=() => shareApi('shares/pause',{}).catch(e=>toast(e.message,true));
+setInterval(async () => {
+  if (!$('sharedlg').open) return;
+  try {
+    const p=await shareApi('shares/progress');
+    if (p.active) $('shareprogress').textContent=p.path+' · '+fmtSize(p.received)+' / '+fmtSize(p.total);
+  } catch(_){}
+},1000);
 
 // 剪贴板：图片（截图场景）直接作为文件发送，文本填入输入框待编辑；
 // WKWebView 可能拒绝 read()，逐级降级到 readText，再不行提示手动粘贴。

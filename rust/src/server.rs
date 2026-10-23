@@ -28,6 +28,9 @@ pub fn build_protocol_router(state: Shared) -> Router {
         .route("/api/localsend/v2/cancel-upload", post(cancel)) // 旧草案别名
         // AntifyBot 私有扩展（官方 App 不会调用；老版本对端 404 → 发送端回退单发）
         .route("/api/antify/v1/resume-info", get(resume_info))
+        .route("/api/antify/v1/share/list", get(crate::shares::list))
+        .route("/api/antify/v1/share/manifest", get(crate::shares::manifest))
+        .route("/api/antify/v1/share/file", get(crate::shares::range))
         .with_state(state)
 }
 
@@ -36,6 +39,12 @@ pub fn build_panel_router(state: Shared) -> Router {
     Router::new()
         .route("/", get(dashboard))
         .route("/api/ui/state", get(ui_state))
+        .route("/api/ui/shares", get(crate::shares::local_list).post(crate::shares::publish))
+        .route("/api/ui/shares/revoke", post(crate::shares::revoke))
+        .route("/api/ui/shares/browse", post(crate::shares::browse))
+        .route("/api/ui/shares/pull", post(crate::shares::pull))
+        .route("/api/ui/shares/progress", get(crate::shares::progress))
+        .route("/api/ui/shares/pause", post(crate::shares::pause))
         .route("/api/ui/send", post(ui_send))
         .route("/api/ui/send-text", post(ui_send_text))
         .route("/api/ui/remove-device", post(ui_remove_device))
@@ -1736,6 +1745,7 @@ pub fn new_state(identity: crate::config::Identity) -> anyhow::Result<Shared> {
     let db = crate::db::Db::open(&identity.cfg_dir.join("chat.db"))?;
     let dl = identity.download_dir.clone();
     Ok(Arc::new(crate::state::AppState {
+        pulls: Default::default(),
         identity,
         download_dir: tokio::sync::RwLock::new(dl),
         db,

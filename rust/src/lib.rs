@@ -6,6 +6,7 @@ pub mod discovery;
 pub mod notify;
 pub mod resume;
 pub mod server;
+pub mod shares;
 pub mod state;
 pub mod ui;
 
