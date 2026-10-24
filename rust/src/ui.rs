@@ -1658,28 +1658,32 @@ $('langpick').addEventListener('click', e => {
   applyLang(b.dataset.v);
 });
 
-// macOS 外部页面不总会收到声明式 data-tauri-drag-region 的注入事件；
-// 这里直接调用 Tauri 窗口接口。设备标题区按下即可拖动；侧栏按钮在移动超过
+// macOS overlay 标题栏：网页工具栏即拖拽区。面板是远程页面（http://127.0.0.1）,
+// Tauri v2 默认拒绝远程源的 IPC —— 必须在 gui/capabilities/remote-panel.json
+// 里授权 start_dragging / internal_toggle_maximize（此前按住拖不动正因缺这份授权）。
+// 行为对齐 Tauri 原生 data-tauri-drag-region：按下即拖动；双击时不在第二次按下
+// 拖动，待松手且鼠标未移动才缩放，符合 macOS 系统习惯。侧栏按钮在移动超过
 // 4px 后才开始拖动，普通点击仍然保持展开/收起行为。
 let suppressSidebarToggleClick = false;
-function requestWindowDrag(){
-  if (!document.documentElement.classList.contains('is-macos')) return;
+let dragDblX = 0, dragDblY = 0;
+function invokeWindowCommand(cmd){
   const invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke;
   if (typeof invoke === 'function'){
-    Promise.resolve(invoke('plugin:window|start_dragging')).catch(() => {});
-    return;
+    Promise.resolve(invoke('plugin:window|' + cmd)).catch(() => {});
   }
-  const start = window.__TAURI__ && window.__TAURI__.window &&
-    window.__TAURI__.window.getCurrentWindow && window.__TAURI__.window.getCurrentWindow().startDragging;
-  if (typeof start === 'function') Promise.resolve(start()).catch(() => {});
 }
 const appChrome = document.querySelector('.appchrome');
 appChrome.addEventListener('mousedown', e => {
   if (e.button !== 0 || !document.documentElement.classList.contains('is-macos')) return;
   const toggle = e.target.closest('#btn-sidebar');
   if (!toggle){
+    // 双击的第二下按下：只记位置，松手未移动才缩放（见下方 mouseup）
+    if (e.detail === 2){
+      dragDblX = e.clientX; dragDblY = e.clientY;
+      return;
+    }
     e.preventDefault();
-    requestWindowDrag();
+    invokeWindowCommand('start_dragging');
     return;
   }
   const startX = e.clientX, startY = e.clientY;
@@ -1692,10 +1696,19 @@ appChrome.addEventListener('mousedown', e => {
     if (started || Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 4) return;
     started = true;
     suppressSidebarToggleClick = true;
-    requestWindowDrag();
+    invokeWindowCommand('start_dragging');
   };
   document.addEventListener('mousemove', move);
   document.addEventListener('mouseup', clear, {once:true});
+});
+// macOS 双击缩放：在第二次按下时仅记位置，松手未移动才缩放
+// （对齐系统与 Tauri 原生拖拽区行为，避免拖动后误触缩放）
+appChrome.addEventListener('mouseup', e => {
+  if (e.button !== 0 || !document.documentElement.classList.contains('is-macos')) return;
+  if (e.detail === 2 && e.clientX === dragDblX && e.clientY === dragDblY
+      && !e.target.closest('#btn-sidebar')){
+    invokeWindowCommand('internal_toggle_maximize');
+  }
 });
 
 $('btn-sidebar').onclick = () => {

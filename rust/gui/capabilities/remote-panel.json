@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote-panel-window-drag",
+  "description": "面板窗口加载的是外部源 http://127.0.0.1:<53318-53337>。Tauri v2 默认拒绝远程页面的 IPC 调用（这正是 macOS overlay 标题栏按住拖不动的原因），这里仅对 main 窗口放开标题栏所需的两个窗口命令：按下拖动 start_dragging 与双击缩放 internal_toggle_maximize，其余 IPC 一律不授权。",
+  "remote": { "urls": ["http://127.0.0.1:*"] },
+  "windows": ["main"],
+  "platforms": ["macOS"],
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize"
+  ]
+}

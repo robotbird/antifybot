@@ -58,6 +58,8 @@ fn main() {
                 .disable_drag_drop_handler();
             // macOS 让网页工具栏延伸至标题栏，同时保留系统交通灯。
             // Windows 仍使用系统标题栏，避免额外维护窗口控制按钮。
+            // 注意：面板是远程页面（http://127.0.0.1），标题栏拖动/双击缩放走 IPC，
+            // 需 gui/capabilities/remote-panel.json 授权，否则工具栏拖不动。
             #[cfg(target_os = "macos")]
             let window = window
                 .title_bar_style(tauri::TitleBarStyle::Overlay)
