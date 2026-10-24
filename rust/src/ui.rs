@@ -660,7 +660,7 @@ const L = {
     selfTag:'本机', selfName:'{0}（本机）',
     selfNoFiles:'本机会话不支持发送文件 / 文件夹',
     chatHint1:'与「{0}」的对话会显示在这里',
-    chatHint2:'拖入文件，或用左下角按钮选择 文件 / 文件夹 / 剪贴板，也可直接输入文字',
+    chatHint2:'拖入文件 / 文件夹，或用左下角按钮选择 文件 / 文件夹 / 剪贴板，也可直接输入文字',
     chatHint2Self:'发给本机的文字备忘会显示在这里（不支持发送文件 / 文件夹）',
     copy:'复制', copied:'已复制', copyFail:'复制失败', show:'显示',
     filePath:'文件位置', openFolder:'打开文件夹',
@@ -670,7 +670,7 @@ const L = {
     waitTitle:'等待设备上线', waitSubNone:'同一 Wi-Fi 下的 LocalSend 设备会自动出现在左侧',
     waitSubSome:'点击左侧的设备开始发送',
     waitOffTitle:'设备暂不在线', waitOffSub:'左侧保留的设备仍可发送，送达需等对方上线',
-    dropHint:'📁 拖入文件即可发送', chooseFiles:'选择文件', sendText:'发送文本', recent:'最近接收',
+    dropHint:'📁 拖入文件 / 文件夹即可发送', chooseFiles:'选择文件', sendText:'发送文本', recent:'最近接收',
     dropSendTo:'松开即发送给「{0}」', dropPick:'松开后选择发送对象', dropNoDev:'暂无设备可发送',
     sendTo:'发送给谁？', cancel:'取消', sendBtn:'发送',
     sendTextT:'发送文本', textPh:'输入要发送的文本…',
@@ -710,7 +710,7 @@ const L = {
     selfTag:'This device', selfName:'{0} (This device)',
     selfNoFiles:"Can't send files or folders to this device",
     chatHint1:'Your conversation with {0} will appear here',
-    chatHint2:'Drop files here, use the buttons at the bottom-left, or just type',
+    chatHint2:'Drop files or folders here, use the buttons at the bottom-left, or just type',
     chatHint2Self:'Text notes to this device appear here (files and folders not supported)',
     copy:'Copy', copied:'Copied', copyFail:'Copy failed', show:'Show',
     filePath:'File location', openFolder:'Open folder',
@@ -720,7 +720,7 @@ const L = {
     waitTitle:'Waiting for devices', waitSubNone:'LocalSend devices on the same Wi-Fi appear here automatically',
     waitSubSome:'Pick a device on the left to start sending',
     waitOffTitle:'Devices are offline', waitOffSub:'Kept devices still accept sends; delivery waits until they are online',
-    dropHint:'📁 Drop files to send', chooseFiles:'Choose files', sendText:'Send text', recent:'Recent',
+    dropHint:'📁 Drop files or folders to send', chooseFiles:'Choose files', sendText:'Send text', recent:'Recent',
     dropSendTo:'Drop to send to "{0}"', dropPick:'Drop, then choose a recipient', dropNoDev:'No device to send to',
     sendTo:'Send to whom?', cancel:'Cancel', sendBtn:'Send',
     sendTextT:'Send text', textPh:'Text to send…',
@@ -959,7 +959,7 @@ function render(s){
         e.preventDefault(); e.stopPropagation();
         row.classList.remove('dropover');
         sel = d.fingerprint; syncSel();
-        sendFiles(d.fingerprint, [...e.dataTransfer.files]); };
+        dispatchDropped(e.dataTransfer, d.fingerprint); };
       box.appendChild(row);
     }
   }
@@ -1786,7 +1786,7 @@ $('upd-open').onclick = async () => {
   }catch(_){ toast(t('openFail'), true); }
 };
 
-// ── 全局拖拽：整个窗口都是投放区 ──
+// ── 全局拖拽：整个窗口都是投放区（文件与整个文件夹均可） ──
 // 拖动中：全窗 accent 高亮 + 顶部胶囊提示默认目标（设备行的 dropover 定向高亮优先于胶囊文案）；
 // 松手：侧栏设备行自带定向投放（ondrop 已 stopPropagation，不会冒泡到这里），
 // 其余任意位置（顶栏 / 侧栏空白 / 会话区 / 等待屏 / 输入盒……）按
@@ -1803,12 +1803,75 @@ function dropTargetText(){
   if (ds.length === 1) return t('dropSendTo', ds[0].alias);
   return t('dropPick');
 }
+// ── 拖入内容展开：文件直收，文件夹递归展开（dataTransfer.files 拿不到目录内容）──
+// items 只在 drop 事件同步期内有效：先快照 entries，再异步遍历；
+// 目录内隐藏项（.DS_Store 等）跳过，顶层显式拖入的文件一律保留。
+function snapshotEntries(dt){
+  const out = [];
+  try{
+    for (const it of (dt && dt.items) || []){
+      if (it.kind !== 'file') continue;
+      const en = typeof it.webkitGetAsEntry === 'function' ? it.webkitGetAsEntry() : null;
+      if (en) out.push(en);
+    }
+  }catch(_){}
+  return out;
+}
+// readEntries 单次最多返回 100 条（WebKit 约定），循环读到空为止
+function readAllDirEntries(dir){
+  return new Promise(res => {
+    const rd = dir.createReader(), all = [];
+    const step = () => rd.readEntries(
+      es => { if (!es.length) return res(all); all.push(...es); step(); },
+      () => res(all));
+    step();
+  });
+}
+const entryFile = fe => new Promise(res => fe.file(res, () => res(null)));
+async function walkEntry(en, out){
+  if (en.isFile){
+    const f = await entryFile(en);
+    if (f) out.files.push(f);
+  } else if (en.isDirectory){
+    out.dirs++;
+    const kids = await readAllDirEntries(en);
+    kids.sort((a,b) => a.isDirectory !== b.isDirectory
+      ? (a.isDirectory ? -1 : 1)
+      : a.name.localeCompare(b.name, undefined, {numeric:true}));
+    for (const k of kids){
+      if (k.name.startsWith('.')) continue; // 隐藏项
+      await walkEntry(k, out);
+    }
+  }
+}
+// 返回 {files, dirs}（dirs = 展开的文件夹个数）；无 entries API 的环境退回 dataTransfer.files
+async function collectDropped(dt){
+  const entries = snapshotEntries(dt);
+  if (entries.length){
+    const out = {files: [], dirs: 0};
+    for (const en of entries) await walkEntry(en, out);
+    return out;
+  }
+  return {files: [...((dt && dt.files) || [])], dirs: 0};
+}
+// 统一投放入口：directFp（设备行定向）> 当前会话 > 唯一设备 > 弹窗选择；本机目标在 sendFiles 内拦截
+async function dispatchDropped(dt, directFp){
+  const {files, dirs} = await collectDropped(dt);
+  if (!files.length){ if (dirs) toast(t('folderEmpty'), true); return; }
+  if (dirs) toast(t('sendingN', files.length));
+  const send = fp => sendFiles(fp, files);
+  if (directFp) return send(directFp);
+  if (sel) return send(sel);
+  resolveTarget(send);
+}
 let depth = 0;
 document.addEventListener('dragenter', e => {
   if (hasFiles(e)){ e.preventDefault(); depth++; document.body.classList.add('dropping');
     $('dropveil-hint').textContent = dropTargetText(); }
 });
-document.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
+document.addEventListener('dragover', e => {
+  if (hasFiles(e)){ e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }
+});
 document.addEventListener('dragleave', e => {
   if (hasFiles(e)){ depth = Math.max(0, depth-1);
     if (!depth) document.body.classList.remove('dropping'); }
@@ -1816,9 +1879,7 @@ document.addEventListener('dragleave', e => {
 document.addEventListener('drop', e => {
   if (!hasFiles(e)) return;
   e.preventDefault(); depth = 0; document.body.classList.remove('dropping');
-  const files = [...e.dataTransfer.files];
-  if (sel) sendFiles(sel, files); // 有会话 → 当前设备（本机目标已在 sendFiles 内拦截提示）
-  else resolveTarget(fp => sendFiles(fp, files)); // 无会话 → 唯一设备直发 / 多台弹窗选择
+  dispatchDropped(e.dataTransfer, null);
 });
 
 // 启动：套用已保存的主题 / 语言，随后开始轮询
