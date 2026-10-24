@@ -12,8 +12,8 @@
 //! 右侧深色圆形发送钮。
 //! 设置面板（侧栏左下角进入）分三节：通用（主题 / 语言）、存储（默认保存地址）、
 //! 关于（版本 / 检查更新 / 节点信息）；主题三态 + 中英文界面，localStorage 持久化。
-//! 拖文件到窗口任意位置即可发送：设备行定向投放优先，其余位置按 当前会话 → 唯一设备 → 弹窗选择
-//! 解析目标；拖动中全窗 accent 内描边高亮 + 顶部胶囊提示目标。
+//! 拖文件到窗口任意位置即可发送：按 当前会话 → 唯一设备 → 弹窗选择 解析目标；
+//! 拖动中仅右侧主区蒙版遮盖并居中提示「松开发送到 xxx」，左侧对话列表零变化。
 //! 事件以 toast 呈现；消息 / 文件到达与出站成败另发系统通知
 //! （面板聚焦时轮询捎带静音；收托盘 / 切后台自动恢复提醒）。
 pub const DASHBOARD: &str = r##"<!doctype html>
@@ -145,8 +145,6 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .dev .meta{font-size:11.5px;color:var(--side-muted);
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .dev.dropover{outline:1.5px solid var(--accent);background:var(--side-hover)}
-  body.dropping .dev{outline-color:var(--accent)}
   /* 离线设备：保留可见但置灰排后；hover 出 ✕ 移除按钮 */
   .dev.off{opacity:.55}
   .dev .xbtn{flex:none;width:20px;height:20px;border:none;border-radius:6px;
@@ -190,7 +188,6 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .cscroll::-webkit-scrollbar-thumb{background-color:var(--scroll-thumb)!important;
     border:3px solid var(--chat-bg)!important;border-radius:999px}
   .cscroll::-webkit-scrollbar-thumb:hover{background-color:var(--scroll-thumb-hover)!important}
-  body.dropping .cscroll{box-shadow:inset 0 0 0 1.5px var(--accent)}
   #chatlist{display:flex;flex-direction:column;gap:16px;padding:22px 26px;
     width:min(720px,100%);margin:0 auto}
   .chathint{margin:60px auto;text-align:center;color:var(--muted);font-size:13px;line-height:1.9}
@@ -268,21 +265,19 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .dropzone{width:min(440px,86%);padding:46px 20px;border:1.5px dashed var(--line);
     border-radius:16px;color:var(--muted);font-size:14px;transition:.18s;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  body.dropping .dropzone{border-color:var(--accent);background:var(--accent-soft);
-    color:var(--accent-deep)}
-  .dropzone.dropover{border-style:solid;border-color:var(--accent);
-    background:var(--accent-soft)}
   .acts2{margin-top:24px;display:flex;gap:14px;align-items:center}
-  /* ── 全窗口拖放反馈（拖动文件中）：accent 内描边 + 浅色蒙层 + 顶部目标提示胶囊 ──
-     pointer-events:none，不拦截拖放事件本身（事件全靠 document 级监听收口） */
-  #dropveil{position:fixed;inset:0;z-index:97;pointer-events:none;opacity:0;
+  /* ── 拖放反馈（拖动文件中）：仅右侧主区蒙版遮盖（accent 浅色蒙层 + 内描边）+ 居中目标提示；
+     左侧列表/顶栏不参与任何拖放反馈。pointer-events:none，不拦截拖放事件本身
+     （事件全靠 document 级监听收口） ── */
+  .main{position:relative}
+  #dropveil{position:absolute;inset:0;z-index:30;pointer-events:none;opacity:0;
     transition:opacity .12s;box-shadow:inset 0 0 0 2px var(--accent);
     background:var(--accent-soft)}
   body.dropping #dropveil{opacity:1}
-  #dropveil .hint{position:absolute;top:56px;left:50%;transform:translateX(-50%);
-    max-width:82vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-    background:var(--accent);color:#fff;border-radius:999px;padding:8px 16px;
-    font-size:13px;font-weight:600;box-shadow:var(--shadow)}
+  #dropveil .hint{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+    max-width:82%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    background:var(--accent);color:#fff;border-radius:14px;padding:14px 26px;
+    font-size:16px;font-weight:600;box-shadow:var(--shadow)}
   .linkbtn{background:none;border:none;padding:4px 2px;font-family:var(--sans);
     font-size:13.5px;color:var(--muted);cursor:pointer;transition:.15s}
   .linkbtn.strong{color:var(--ink);font-weight:600}
@@ -521,6 +516,8 @@ try{
       </section>
     </section>
 
+    <!-- 拖放蒙版：仅覆盖右侧主区（会话/等待屏），居中提示发送目标；左侧列表不参与拖放反馈 -->
+    <div id="dropveil" aria-hidden="true"><span class="hint" id="dropveil-hint"></span></div>
   </main>
 
 </div>
@@ -633,7 +630,6 @@ try{
   </div>
 </dialog>
 
-<div id="dropveil" aria-hidden="true"><span class="hint" id="dropveil-hint"></span></div>
 <div id="lightbox" hidden><img alt=""></div>
 <div id="filemenu" role="menu" hidden>
   <button class="filemenu-item" id="filemenu-copy" type="button" data-t="copy">复制</button>
@@ -671,7 +667,7 @@ const L = {
     waitSubSome:'点击左侧的设备开始发送',
     waitOffTitle:'设备暂不在线', waitOffSub:'左侧保留的设备仍可发送，送达需等对方上线',
     dropHint:'📁 拖入文件 / 文件夹即可发送', chooseFiles:'选择文件', sendText:'发送文本', recent:'最近接收',
-    dropSendTo:'松开即发送给「{0}」', dropPick:'松开后选择发送对象', dropNoDev:'暂无设备可发送',
+    dropSendTo:'松开发送到「{0}」', dropPick:'松开后选择发送对象', dropNoDev:'暂无设备可发送',
     sendTo:'发送给谁？', cancel:'取消', sendBtn:'发送',
     sendTextT:'发送文本', textPh:'输入要发送的文本…',
     portL:'端口',
@@ -901,7 +897,7 @@ function render(s){
 
   // ── 侧栏设备（内容有变化才重绘，避免打断 hover / 拖放；key 含语言，切语言强制重绘） ──
   // 会话列表式：第二行显示与该设备的最近一条消息预览；离线设备置灰保留；
-  // 本机钉在首位（自我会话，无 ✕、拒收文件拖放）
+  // 本机钉在首位（自我会话，无 ✕；拖放本机目标由 sendFiles 统一拦截提示）
   const lastByFp = {};
   for (const m of (s.chat||[])) lastByFp[m.peer] = m;
   // 防抖 key：lastSeenMs 每轮轮询都在变，按分钟分桶；identity/在线态/预览 id 变了才重绘
@@ -927,13 +923,8 @@ function render(s){
       mid.append(nm, meta);
       row.append(ico, mid);
       row.onclick = () => { sel = (sel === selfFp ? null : selfFp); syncSel(); };
-      // 拖文件到本机行：高亮照常，松手明确提示不支持
-      row.ondragover = e => { if (hasFiles(e)){ e.preventDefault();
-        e.dataTransfer.dropEffect = 'copy'; row.classList.add('dropover'); } };
-      row.ondragleave = () => row.classList.remove('dropover');
-      row.ondrop = e => { if (!hasFiles(e)) return;
-        e.preventDefault(); e.stopPropagation(); row.classList.remove('dropover');
-        toast(t('selfNoFiles'), true); };
+      // 拖放反馈只在右侧主区：左侧列表（含本机行）不参与拖放，
+      // 拖入本机会话时由 sendFiles 统一拦截并提示 selfNoFiles
       box.appendChild(row);
     }
     for (const d of s.devices){
@@ -951,15 +942,7 @@ function render(s){
       x.onclick = e => { e.stopPropagation(); removeDevice(d); };
       row.append(ico, mid, x);
       row.onclick = () => { sel = (sel === d.fingerprint ? null : d.fingerprint); syncSel(); };
-      // 拖文件到设备行 = 发给这台设备
-      row.ondragover = e => { if (hasFiles(e)){ e.preventDefault();
-        e.dataTransfer.dropEffect = 'copy'; row.classList.add('dropover'); } };
-      row.ondragleave = () => row.classList.remove('dropover');
-      row.ondrop = e => { if (!hasFiles(e)) return;
-        e.preventDefault(); e.stopPropagation();
-        row.classList.remove('dropover');
-        sel = d.fingerprint; syncSel();
-        dispatchDropped(e.dataTransfer, d.fingerprint); };
+      // 拖放反馈只在右侧主区：设备行不再定向投放/高亮，左侧列表拖动中零变化
       box.appendChild(row);
     }
   }
@@ -1327,7 +1310,7 @@ $('pickcancel').onclick = () => $('pickdlg').close();
 
 $('btn-file').onclick = () => resolveTarget(fp => pickNative('file', fp));
 
-// 拖放已收口到页尾「全局拖拽」：窗口任意位置松手即发送（设备行定向投放优先，见下）
+// 拖放已收口到页尾「全局拖拽」：窗口任意位置松手即发送（目标解析见下）
 
 // ── 聊天输入条：Enter 发送（失败已在会话流留 ⚠ 气泡，不回填输入框） ──
 function sendChatText(){
@@ -1800,20 +1783,20 @@ $('upd-open').onclick = async () => {
 };
 
 // ── 全局拖拽：整个窗口都是投放区（文件与整个文件夹均可） ──
-// 拖动中：全窗 accent 高亮 + 顶部胶囊提示默认目标（设备行的 dropover 定向高亮优先于胶囊文案）；
-// 松手：侧栏设备行自带定向投放（ondrop 已 stopPropagation，不会冒泡到这里），
-// 其余任意位置（顶栏 / 侧栏空白 / 会话区 / 等待屏 / 输入盒……）按
-// 当前会话 → 唯一设备 → 弹窗选择 解析目标。
+// 拖动反馈只在右侧主区：蒙版遮盖 + 居中提示「松开发送到 xxx」（目标按
+// 当前会话 → 唯一设备 → 弹窗选择 解析；左侧对话列表拖动中零变化）。
+// 松手：窗口任意位置（顶栏 / 侧栏 / 会话区 / 等待屏 / 输入盒……）统一走
+// dispatchDropped 解析目标；本机会话由 sendFiles 拦截提示。
 function dropTargetText(){
   const st = window._state || {}, ds = st.devices || [];
   const meFp = (st.me||{}).fingerprint || '';
   if (sel){
     if (sel === meFp) return t('selfNoFiles');
     const d = ds.find(x => x.fingerprint === sel);
-    if (d) return t('dropSendTo', d.alias);
+    if (d) return t('dropSendTo', displayAlias(d.alias));
   }
   if (!ds.length) return t('dropNoDev');
-  if (ds.length === 1) return t('dropSendTo', ds[0].alias);
+  if (ds.length === 1) return t('dropSendTo', displayAlias(ds[0].alias));
   return t('dropPick');
 }
 // ── 拖入内容展开：文件直收，文件夹递归展开（dataTransfer.files 拿不到目录内容）──
@@ -1867,15 +1850,13 @@ async function collectDropped(dt){
   }
   return {files: [...((dt && dt.files) || [])], dirs: 0};
 }
-// 统一投放入口：directFp（设备行定向）> 当前会话 > 唯一设备 > 弹窗选择；本机目标在 sendFiles 内拦截
-async function dispatchDropped(dt, directFp){
+// 统一投放入口：当前会话 > 唯一设备 > 弹窗选择；本机目标在 sendFiles 内拦截
+async function dispatchDropped(dt){
   const {files, dirs} = await collectDropped(dt);
   if (!files.length){ if (dirs) toast(t('folderEmpty'), true); return; }
   if (dirs) toast(t('sendingN', files.length));
-  const send = fp => sendFiles(fp, files);
-  if (directFp) return send(directFp);
-  if (sel) return send(sel);
-  resolveTarget(send);
+  if (sel) return sendFiles(sel, files);
+  resolveTarget(fp => sendFiles(fp, files));
 }
 let depth = 0;
 document.addEventListener('dragenter', e => {
@@ -1892,7 +1873,7 @@ document.addEventListener('dragleave', e => {
 document.addEventListener('drop', e => {
   if (!hasFiles(e)) return;
   e.preventDefault(); depth = 0; document.body.classList.remove('dropping');
-  dispatchDropped(e.dataTransfer, null);
+  dispatchDropped(e.dataTransfer);
 });
 
 // 启动：套用已保存的主题 / 语言，随后开始轮询
