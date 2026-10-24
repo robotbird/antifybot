@@ -53,9 +53,9 @@ fn main() {
                 .title("AntifyBot")
                 .inner_size(900.0, 680.0)
                 .min_inner_size(720.0, 540.0)
-                // 面板用 HTML5 拖放（整窗任意位置可拖入文件/文件夹）：关掉 Tauri
-                // 原生拦截，否则 drop 事件到不了页面（外链页面无 IPC，收不到替代事件）
-                .drag_drop_enabled(false);
+                // 面板用 HTML5 拖放（整窗任意位置可拖入文件/文件夹）：禁用 Tauri
+                // 原生拖放拦截，否则 drop 事件到不了页面（外链页面无 IPC，收不到替代事件）
+                .disable_drag_drop_handler();
             // macOS 让网页工具栏延伸至标题栏，同时保留系统交通灯。
             // Windows 仍使用系统标题栏，避免额外维护窗口控制按钮。
             #[cfg(target_os = "macos")]
