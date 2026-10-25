@@ -2,7 +2,8 @@
 //! 左右分栏：ChatGPT 式浅暖灰侧栏（品牌 + 设备列表 + 左下角「设置」入口），
 //! 近白主区；深色模式镜像为暗一档。
 //! 设备上线 → 左侧会话列表式列表（第二行显示最近一条消息预览）；
-//! 本机固定钉在列表首位（自我会话：仅文字，文件 / 文件夹按钮停用，顶栏与头部显示本机 ip:端口）；
+//! 本机固定钉在列表首位（自我会话：仅文字，文件 / 文件夹按钮停用，顶栏与头部显示本机 ip:端口，
+//! 主对话窗口标题旁另以淡蓝色徽标标注「本机」）；
 //! 点选设备 → 会话视图（ChatGPT 式灰白）：头部横带取侧栏同色（与侧栏连成 L 形），
 //! 消息区纯白（深色为 #212121，比侧栏亮半档拉开 L 形层次）——出站灰底大圆角气泡、入站无气泡纯文本、无头像，
 //! 图片直接显示缩略图（点击全屏查看，加载失败退回文件卡片）、文件为中性卡片，
@@ -31,6 +32,8 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     --accent:#3979e8; --accent-deep:#2466cf;
     /* 设定页的保存操作沿用界面既有主蓝色，不随深色主题的橙色强调色切换。 */
     --ui-blue:#3979e8; --ui-blue-deep:#2466cf;
+    /* 「本机」徽标（主对话窗口标题旁）：淡蓝色胶囊 */
+    --self-ink:#3d82ec; --self-bg:rgba(57,121,232,.10); --self-line:rgba(57,121,232,.22);
     --accent-soft:rgba(57,121,232,.11); --ok:#34a853; --err:#d84b52;
     /* 侧栏：ChatGPT 式浅暖灰，比主区深半档 */
     --side:#f0f0f1; --side-ink:#24262a; --side-muted:#777a80;
@@ -51,6 +54,7 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     --line:rgba(255,255,255,.11); --line-strong:rgba(255,255,255,.16);
     --accent:#e8932c; --accent-deep:#f0a64e;
     --accent-soft:rgba(232,147,44,.14); --ok:#4cc38a; --err:#ff6b6e;
+    --self-ink:#8ab4f8; --self-bg:rgba(138,180,248,.13); --self-line:rgba(138,180,248,.26);
     --side:#131315; --side-ink:#f0f0f2; --side-muted:#9a9aa0;
     --side-line:rgba(255,255,255,.10); --side-hover:rgba(255,255,255,.05);
     --side-sel:rgba(255,255,255,.09);
@@ -66,6 +70,7 @@ pub const DASHBOARD: &str = r##"<!doctype html>
       --line:rgba(255,255,255,.11); --line-strong:rgba(255,255,255,.16);
     --accent:#e8932c; --accent-deep:#f0a64e;
       --accent-soft:rgba(232,147,44,.14); --ok:#4cc38a; --err:#ff6b6e;
+      --self-ink:#8ab4f8; --self-bg:rgba(138,180,248,.13); --self-line:rgba(138,180,248,.26);
       --side:#131315; --side-ink:#f0f0f2; --side-muted:#9a9aa0;
       --side-line:rgba(255,255,255,.10); --side-hover:rgba(255,255,255,.05);
       --side-sel:rgba(255,255,255,.09);
@@ -101,6 +106,11 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .crumbs{display:flex;align-items:center;gap:8px;min-width:0;color:var(--muted);font-size:12.5px}
   .crumbs b{color:var(--ink);font-weight:680;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .chrome-context{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* 本机徽标：主对话窗口标题旁的淡蓝色胶囊（仅本机会话显示） */
+  .chrome-badge{flex:none;padding:1.5px 8px;border-radius:999px;font-size:11px;
+    font-weight:600;line-height:1.5;color:var(--self-ink);background:var(--self-bg);
+    border:1px solid var(--self-line)}
+  .chrome-badge[hidden]{display:none}
   .workspace{display:flex;min-height:0}
   /* Tauri on macOS overlays the native traffic lights onto this toolbar. */
   .is-macos .chrome-side{padding-left:76px}
@@ -457,7 +467,7 @@ try{
       <button class="sidebar-toggle" id="btn-sidebar" title="收起侧栏" aria-label="收起侧栏"><i aria-hidden="true"></i></button>
     </div>
     <div class="chrome-main">
-      <div class="crumbs"><b id="chrome-title">设备与会话</b><span class="chrome-context" id="chrome-context"></span></div>
+      <div class="crumbs"><b id="chrome-title">设备与会话</b><span class="chrome-badge" id="chrome-badge" data-t="selfTag" hidden>本机</span><span class="chrome-context" id="chrome-context"></span></div>
     </div>
   </header>
   <div class="workspace">
@@ -1065,9 +1075,11 @@ function renderCenter(s){
     }
     $('ch-meta').textContent = meta;
     $('chrome-title').textContent = alias;
+    $('chrome-badge').hidden = !isSelf; // 本机会话：标题旁淡蓝「本机」徽标
     $('chrome-context').textContent = meta;
   } else {
     $('chrome-title').textContent = t('devices');
+    $('chrome-badge').hidden = true;
     $('chrome-context').textContent = '';
     const allOff = s.devices.length && !s.devices.some(x => x.online);
     $('c-title').textContent = allOff ? t('waitOffTitle') : t('waitTitle');
