@@ -29,8 +29,8 @@ cat > "$OUT/Contents/Info.plist" <<'PLIST'
     <key>CFBundleDisplayName</key>       <string>AntifyBot</string>
     <key>CFBundleExecutable</key>        <string>AntifyBot</string>
     <key>CFBundleIdentifier</key>        <string>works.antifybot.rs</string>
-    <key>CFBundleVersion</key>           <string>1.3.2</string>
-    <key>CFBundleShortVersionString</key><string>1.3.2</string>
+    <key>CFBundleVersion</key>           <string>1.4.0</string>
+    <key>CFBundleShortVersionString</key><string>1.4.0</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>CFBundleIconFile</key>          <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>    <string>11.3</string>
