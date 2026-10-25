@@ -37,10 +37,10 @@ struct Progress {
     error: String,
 }
 #[derive(Serialize, Deserialize)]
-struct Share {
-    token: String,
-    name: String,
-    root: PathBuf,
+pub(crate) struct Share {
+    pub(crate) token: String,
+    pub(crate) name: String,
+    pub(crate) root: PathBuf,
 }
 #[derive(Deserialize)]
 pub struct Publish {
@@ -82,13 +82,13 @@ pub struct Range {
     offset: u64,
 }
 #[derive(Deserialize, Serialize)]
-struct Manifest {
-    size: u64,
-    sha256: String,
-    version: String,
+pub(crate) struct Manifest {
+    pub(crate) size: u64,
+    pub(crate) sha256: String,
+    pub(crate) version: String,
 }
 
-fn reply(result: Result<serde_json::Value>) -> Response {
+pub(crate) fn reply(result: Result<serde_json::Value>) -> Response {
     match result {
         Ok(v) => Json(v).into_response(),
         Err(e) => (
@@ -98,14 +98,14 @@ fn reply(result: Result<serde_json::Value>) -> Response {
             .into_response(),
     }
 }
-fn valid_token(token: &str) -> Result<()> {
+pub(crate) fn valid_token(token: &str) -> Result<()> {
     ensure!(
         token.len() == 32 && token.bytes().all(|b| b.is_ascii_hexdigit()),
         "无效共享地址"
     );
     Ok(())
 }
-fn parts(path: &str) -> Result<Vec<&str>> {
+pub(crate) fn parts(path: &str) -> Result<Vec<&str>> {
     if path.is_empty() {
         return Ok(vec![]);
     }
@@ -124,14 +124,14 @@ fn parts(path: &str) -> Result<Vec<&str>> {
 fn store(state: &Shared) -> PathBuf {
     state.identity.cfg_dir.join("shares")
 }
-async fn load(state: &Shared, token: &str) -> Result<Share> {
+pub(crate) async fn load(state: &Shared, token: &str) -> Result<Share> {
     valid_token(token)?;
     let bytes = tokio::fs::read(store(state).join(format!("{token}.json")))
         .await
         .context("共享不存在或已撤销")?;
     Ok(serde_json::from_slice(&bytes)?)
 }
-async fn resolve(root: &Path, path: &str) -> Result<PathBuf> {
+pub(crate) async fn resolve(root: &Path, path: &str) -> Result<PathBuf> {
     let mut out = root.to_owned();
     ensure!(
         tokio::fs::canonicalize(root).await? == root,
@@ -150,14 +150,14 @@ async fn file(state: &Shared, loc: &Location) -> Result<PathBuf> {
     ensure!(tokio::fs::metadata(&path).await?.is_file(), "不是常规文件");
     Ok(path)
 }
-fn version(m: &std::fs::Metadata) -> Result<String> {
+pub(crate) fn version(m: &std::fs::Metadata) -> Result<String> {
     Ok(format!(
         "{}-{}",
         m.len(),
         m.modified()?.duration_since(UNIX_EPOCH)?.as_nanos()
     ))
 }
-async fn hash(path: &Path) -> Result<String> {
+pub(crate) async fn hash(path: &Path) -> Result<String> {
     let mut f = tokio::fs::File::open(path).await?;
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 256 * 1024];
@@ -192,6 +192,7 @@ pub async fn local_list(State(state): State<Shared>) -> Response {
             let mut rd = tokio::fs::read_dir(store(&state)).await?;
             let mut shares = vec![];
             while let Some(e) = rd.next_entry().await? {
+                if e.path().extension().and_then(|x| x.to_str()) != Some("json") { continue; }
                 if let Ok(s) = serde_json::from_slice::<Share>(&tokio::fs::read(e.path()).await?) {
                     shares.push(json!({"token":s.token,"name":s.name,"path":s.root}));
                 }
@@ -300,7 +301,7 @@ pub async fn range(State(state): State<Shared>, Query(q): Query<Range>) -> Respo
 }
 
 // Remote requests are limited to discovered peers, never arbitrary panel-supplied URLs.
-async fn remote(state: &Shared, target: &str, token: &str) -> Result<(reqwest::Client, String)> {
+pub(crate) async fn remote(state: &Shared, target: &str, token: &str) -> Result<(reqwest::Client, String)> {
     valid_token(token)?;
     let d = state
         .devices
@@ -345,7 +346,7 @@ async fn remote(state: &Shared, target: &str, token: &str) -> Result<(reqwest::C
         .build()?;
     Ok((pinned, d.base_url()))
 }
-async fn remote_json(response: reqwest::Response) -> Result<serde_json::Value> {
+pub(crate) async fn remote_json(response: reqwest::Response) -> Result<serde_json::Value> {
     let status = response.status();
     let v: serde_json::Value = response
         .json()
@@ -379,7 +380,7 @@ pub async fn browse(State(state): State<Shared>, Json(q): Json<Browse>) -> Respo
     )
 }
 
-async fn safe_dir(root: &Path, segments: &[&str]) -> Result<PathBuf> {
+pub(crate) async fn safe_dir(root: &Path, segments: &[&str]) -> Result<PathBuf> {
     let mut dir = root.to_owned();
     for s in segments {
         dir.push(s);

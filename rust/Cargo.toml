@@ -41,6 +41,8 @@ socket2 = "0.6"
 if-addrs = "0.13"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rfd = "0.15"
+# Download-volume free-space checks (not a fixed file-count limit).
+fs2 = "0.4"
 
 [profile.release]
 strip = true

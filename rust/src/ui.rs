@@ -278,6 +278,18 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     max-width:82%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
     background:var(--accent);color:#fff;border-radius:14px;padding:14px 26px;
     font-size:16px;font-weight:600;box-shadow:var(--shadow)}
+  .transfer-card{width:min(460px,100%);min-width:min(300px,100%);padding:16px;
+    border:1px solid var(--line);border-radius:14px;background:var(--chat-bg);overflow-wrap:anywhere}
+  .transfer-card h3{font-size:15px;margin:0 0 8px}
+  .transfer-card .transfer-info{font-size:12px;color:var(--muted);white-space:pre-line;margin:8px 0}
+  .transfer-card progress{width:100%;height:8px;accent-color:var(--accent)}
+  .transfer-card .transfer-actions{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+  .transfer-card details{font-size:12px;margin-top:12px}
+  .transfer-card summary{cursor:pointer;color:var(--muted)}
+  .transfer-card pre{max-height:220px;overflow:auto;white-space:pre-wrap;font-size:11px;user-select:text}
+  .transfer-browser{max-height:260px;overflow:auto;margin-top:10px}
+  .transfer-browser > div{display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--line);padding:8px 0}
+  .transfer-browser span{flex:1;min-width:0;overflow-wrap:anywhere}
   .linkbtn{background:none;border:none;padding:4px 2px;font-family:var(--sans);
     font-size:13.5px;color:var(--muted);cursor:pointer;transition:.15s}
   .linkbtn.strong{color:var(--ink);font-weight:600}
@@ -637,6 +649,7 @@ try{
 </div>
 <div id="toasts"></div>
 
+<script src="/transfer-ui.js"></script>
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
@@ -1113,11 +1126,9 @@ function renderChat(s){
     if (m.kind === 'text'){
       bub.textContent = m.text;
       const share = (m.text || '').match(/antify-share:\/\/([a-fA-F0-9]{64})\/([a-fA-F0-9]{32})\b/);
-      if (share && !m.out){
-        const b = document.createElement('button'); b.className = 'rbtn';
-        b.textContent = shareText('browse');
-        b.onclick = () => openShare(share[0]);
-        bub.append(document.createElement('br'), b);
+      if (share){
+        bub.textContent = '';
+        bub.appendChild(folderCard(m, share));
       }
     } else {
       // 中性文件卡片（图片加载失败时的退路）
@@ -1159,7 +1170,7 @@ function renderChat(s){
           () => { m.file ? reveal(m.file) : revealSource(m.id); });
       }
     }
-    if (m.kind === 'text' && !m.out){ // 文字不落盘，「复制」是取走内容的唯一途径
+    if (m.kind === 'text' && !m.out && !bub.querySelector('.transfer-card')){ // 普通文字提供复制；共享地址藏在卡片操作中
       const cp = document.createElement('button'); cp.className = 'rxb';
       cp.textContent = t('copy');
       cp.onclick = () => { const txt = m.text, done = () => toast(t('copied'));
@@ -1386,8 +1397,16 @@ async function publishFolder(fp){
     let paths;
     try { paths = (await shareApi('pick', {kind:'folder'})).paths; }
     catch (_) { const p = prompt(shareText('path')); paths = p ? [p] : null; }
-    if (!paths || !paths.length || !confirm(shareText('confirm'))) return;
-    const v = await shareApi('shares', {path:paths[0]});
+    if (!paths || !paths.length) return;
+    prepareFolderOffer(fp, paths[0]);
+  } catch(e) { toast(e.message, true); }
+}
+// 发送方流程保持简单：确认后发布共享并把邀请发进会话；后续进度、日志都在
+// 对方接收卡里（本版不回传接收进度，卡片文案已明确说明）。
+async function prepareFolderOffer(fp, path){
+  if (!confirm(shareText('confirm'))) return;
+  try {
+    const v = await shareApi('shares', {path});
     await shareApi('send-text', {target:fp,text:'📂 '+v.name+'\n'+v.address});
     toast(shareText('offline'));
   } catch(e) { toast(e.message, true); }

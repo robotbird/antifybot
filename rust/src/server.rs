@@ -31,6 +31,7 @@ pub fn build_protocol_router(state: Shared) -> Router {
         .route("/api/antify/v1/share/list", get(crate::shares::list))
         .route("/api/antify/v1/share/manifest", get(crate::shares::manifest))
         .route("/api/antify/v1/share/file", get(crate::shares::range))
+        .route("/api/antify/v2/share/index", get(crate::transfers::index::page))
         .with_state(state)
 }
 
@@ -38,6 +39,9 @@ pub fn build_protocol_router(state: Shared) -> Router {
 pub fn build_panel_router(state: Shared) -> Router {
     Router::new()
         .route("/", get(dashboard))
+        .route("/transfer-ui.js", get(|| async {
+            ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("transfer-ui.js"))
+        }))
         .route("/api/ui/state", get(ui_state))
         .route("/api/ui/shares", get(crate::shares::local_list).post(crate::shares::publish))
         .route("/api/ui/shares/revoke", post(crate::shares::revoke))
@@ -45,6 +49,10 @@ pub fn build_panel_router(state: Shared) -> Router {
         .route("/api/ui/shares/pull", post(crate::shares::pull))
         .route("/api/ui/shares/progress", get(crate::shares::progress))
         .route("/api/ui/shares/pause", post(crate::shares::pause))
+        .route("/api/ui/transfers", get(crate::transfers::list).post(crate::transfers::create))
+        .route("/api/ui/transfers/{id}/logs", get(crate::transfers::logs))
+        .route("/api/ui/transfers/{id}/export", get(crate::transfers::export))
+        .route("/api/ui/transfers/{id}/{action}", post(crate::transfers::control))
         .route("/api/ui/send", post(ui_send))
         .route("/api/ui/send-text", post(ui_send_text))
         .route("/api/ui/remove-device", post(ui_remove_device))
@@ -1744,8 +1752,10 @@ pub fn http_client() -> reqwest::Client {
 pub fn new_state(identity: crate::config::Identity) -> anyhow::Result<Shared> {
     let db = crate::db::Db::open(&identity.cfg_dir.join("chat.db"))?;
     let dl = identity.download_dir.clone();
+    let transfers = crate::transfers::Manager::open(&identity.cfg_dir.join("transfers"))?;
     Ok(Arc::new(crate::state::AppState {
         pulls: Default::default(),
+        transfers,
         identity,
         download_dir: tokio::sync::RwLock::new(dl),
         db,

@@ -8,6 +8,7 @@ pub mod resume;
 pub mod server;
 pub mod shares;
 pub mod state;
+pub mod transfers;
 pub mod ui;
 
 use state::Shared;
