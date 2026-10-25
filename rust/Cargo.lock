@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "antify-gui"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "antify-rs",
  "axum-server",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "antify-rs"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "anyhow",
  "axum",
