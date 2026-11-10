@@ -6,6 +6,8 @@
 
 **无需注册、无需登录、无需公网。** 手机装 LocalSend、电脑跑 AntifyBot，互相就能看见、互发文件。
 
+另提供独立的 **[Rust 公网中转服务](rust/relay/README.md)**：设备令牌认证、消息离线补收、WebSocket 推送、文件中转，支持仅部署一个 Linux 静态程序。桌面客户端从 v1.5.0-rc.1 起可在「设置 → 远程连接」配置中转，详见 **[双 Mac 远程测试说明](docs/remote-connection.md)**。
+
 ---
 
 ## 快速开始

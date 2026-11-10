@@ -5,6 +5,7 @@ pub mod db;
 pub mod discovery;
 pub mod notify;
 pub mod resume;
+pub mod relay;
 pub mod server;
 pub mod shares;
 pub mod state;
@@ -34,6 +35,7 @@ pub async fn start_node(
     let state = server::new_state(identity)?;
     // 启动恢复：上次记住的设备（含离线的）回内存，在途消息落 fail
     state.load_persisted().await;
+    relay::start(state.clone());
     if actual_port != port {
         state
             .log_event(format!("端口 {port} 被占用，HTTPS 已改用 {actual_port}"))

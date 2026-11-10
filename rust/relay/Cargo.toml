@@ -1,0 +1,23 @@
+[package]
+name = "antify-relay"
+version = "0.1.0"
+edition = "2021"
+description = "AntifyBot minimal authenticated message and file relay"
+
+[dependencies]
+antify-protocol = { path = "../protocol" }
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+tokio-tungstenite = "0.29"

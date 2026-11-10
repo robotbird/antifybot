@@ -1,9 +1,9 @@
 [workspace]
-members = ["gui"]
+members = ["gui", "relay", "protocol"]
 
 [package]
 name = "antify-rs"
-version = "1.4.1"
+version = "1.5.0-rc.1"
 edition = "2021"
 description = "AntifyBot Rust 节点：LocalSend v2 协议实现（发现 / 接收 / 发送）"
 
@@ -16,6 +16,8 @@ name = "antify-rs"
 path = "src/main.rs"
 
 [dependencies]
+antify-protocol = { path = "protocol" }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 # no-provider 变体：加密后端由我们自己 install 的 ring 提供（避免 aws-lc-rs 的 CMake/Ninja 构建依赖，Windows 更友好）
@@ -43,6 +45,9 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 rfd = "0.15"
 # Download-volume free-space checks (not a fixed file-count limit).
 fs2 = "0.4"
+
+[dev-dependencies]
+antify-relay = { path = "relay" }
 
 [profile.release]
 strip = true

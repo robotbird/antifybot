@@ -1,0 +1,27 @@
+[Unit]
+Description=AntifyBot message and file relay
+After=network.target
+
+[Service]
+Type=simple
+User=antify-relay
+Group=antify-relay
+WorkingDirectory=/var/lib/antify-relay
+Environment=ANTIFY_RELAY_CONFIG=/etc/antify-relay/server.json
+ExecStart=/opt/antify-relay/bin/antify-relay
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/antify-relay
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LimitNOFILE=4096
+MemoryMax=128M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

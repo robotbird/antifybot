@@ -43,6 +43,7 @@ pub fn build_panel_router(state: Shared) -> Router {
             ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("transfer-ui.js"))
         }))
         .route("/api/ui/state", get(ui_state))
+        .route("/api/ui/relay", get(ui_relay).post(ui_set_relay))
         .route("/api/ui/shares", get(crate::shares::local_list).post(crate::shares::publish))
         .route("/api/ui/shares/revoke", post(crate::shares::revoke))
         .route("/api/ui/shares/browse", post(crate::shares::browse))
@@ -978,7 +979,7 @@ async fn ui_state(State(state): State<Shared>, Query(q): Query<UiStateQuery>) ->
     *state.panel_focus.lock().unwrap_or_else(|e| e.into_inner()) =
         Some((q.focused.unwrap_or(0) == 1, std::time::Instant::now()));
     let id = &state.identity;
-    let devices: Vec<serde_json::Value> = {
+    let mut devices: Vec<serde_json::Value> = {
         let devices = state.devices.lock().await;
         let now = now_ms();
         let online = |d: &Device| now.saturating_sub(d.last_seen) < ONLINE_MS;
@@ -1006,6 +1007,8 @@ async fn ui_state(State(state): State<Shared>, Query(q): Query<UiStateQuery>) ->
             })
             .collect()
     };
+    devices.extend(crate::relay::devices(&state).await);
+    let relay = crate::relay::view(&state).await;
     let received: Vec<serde_json::Value> = {
         let rec = state.received.lock().await;
         rec.iter()
@@ -1069,6 +1072,7 @@ async fn ui_state(State(state): State<Shared>, Query(q): Query<UiStateQuery>) ->
             "dir": state.download_dir.read().await.display().to_string(),
         },
         "devices": devices,
+        "relay": relay,
         "received": received,
         "events": events,
         "session": session,
@@ -1092,6 +1096,12 @@ async fn ui_send(
     Query(q): Query<UiSendQuery>,
     req: Request,
 ) -> Response {
+    if crate::relay::is_remote(&q.target) {
+        return match crate::relay::enqueue_stream(&state,&q.target,q.name.unwrap_or_else(||"file.bin".into()),q.size.unwrap_or(0),req.into_body()).await {
+            Ok(id) => Json(json!({"ok":true,"id":id,"queued":true})).into_response(),
+            Err(e) => err_json(StatusCode::BAD_REQUEST,&format!("{e:#}")),
+        };
+    }
     let Some(target) = state.devices.lock().await.get(&q.target).cloned() else {
         return err_json(StatusCode::NOT_FOUND, "目标设备不存在（可能已下线）");
     };
@@ -1271,6 +1281,12 @@ struct UiSendText {
 }
 
 async fn ui_send_text(State(state): State<Shared>, axum::Json(body): axum::Json<UiSendText>) -> Response {
+    if crate::relay::is_remote(&body.target) {
+        return match crate::relay::enqueue_text(&state,&body.target,body.text).await {
+            Ok(id) => Json(json!({"ok":true,"id":id,"queued":true})).into_response(),
+            Err(e) => err_json(StatusCode::BAD_REQUEST,&format!("{e:#}")),
+        };
+    }
     // 发给本机（侧栏钉住的自我会话）：不出网络，直接落一条已送达消息
     if body.target == state.identity.fingerprint {
         state
@@ -1448,6 +1464,21 @@ struct UiSendPath {
 /// 按本机路径发送（原生选择器返回的路径，或重试）：目录递归展开为多个独立气泡，
 /// 每条消息记录 src_path（重试从原路径重读重发，不复制缓存副本）
 async fn ui_send_path(State(state): State<Shared>, axum::Json(body): axum::Json<UiSendPath>) -> Response {
+    if crate::relay::is_remote(&body.target) {
+        let files = match collect_files(std::path::Path::new(&body.path)) {
+            Ok(files) if !files.is_empty() && files.len()<=1000 => files,
+            Ok(_) => return err_json(StatusCode::BAD_REQUEST,"请选择 1..1000 个文件"),
+            Err(e) => return err_json(StatusCode::BAD_REQUEST,&format!("{e:#}")),
+        };
+        let mut ids=Vec::new();
+        for path in files {
+            match crate::relay::enqueue_file(&state,&body.target,path,None).await {
+                Ok(id) => ids.push(id),
+                Err(e) => return Json(json!({"ok":false,"ids":ids,"error":format!("{e:#}")})).into_response(),
+            }
+        }
+        return Json(json!({"ok":true,"ids":ids,"queued":true})).into_response();
+    }
     let Some(target) = state.devices.lock().await.get(&body.target).cloned() else {
         return err_json(StatusCode::NOT_FOUND, "目标设备不存在（可能已被移除）");
     };
@@ -1535,6 +1566,12 @@ async fn ui_retry(State(state): State<Shared>, axum::Json(body): axum::Json<UiRe
     }
     if m.status != "fail" {
         return err_json(StatusCode::BAD_REQUEST, "该消息已送达");
+    }
+    if crate::relay::is_remote(&m.peer) {
+        return match crate::relay::retry(&state,body.id).await {
+            Ok(()) => Json(json!({"ok":true,"queued":true})).into_response(),
+            Err(e) => err_json(StatusCode::BAD_REQUEST,&format!("{e:#}")),
+        };
     }
     let Some(target) = state.devices.lock().await.get(&m.peer).cloned() else {
         return err_json(StatusCode::BAD_REQUEST, "设备已从列表移除，无法重试");
@@ -1753,7 +1790,9 @@ pub fn new_state(identity: crate::config::Identity) -> anyhow::Result<Shared> {
     let db = crate::db::Db::open(&identity.cfg_dir.join("chat.db"))?;
     let dl = identity.download_dir.clone();
     let transfers = crate::transfers::Manager::open(&identity.cfg_dir.join("transfers"))?;
+    let relay = crate::relay::Runtime::load(&identity.cfg_dir);
     Ok(Arc::new(crate::state::AppState {
+        relay,
         pulls: Default::default(),
         transfers,
         identity,
@@ -1778,6 +1817,17 @@ pub fn new_state(identity: crate::config::Identity) -> anyhow::Result<Shared> {
 }
 
 // ═══════════════ 设置面板 API ═══════════════
+
+async fn ui_relay(State(state): State<Shared>) -> Json<serde_json::Value> {
+    Json(crate::relay::view(&state).await)
+}
+
+async fn ui_set_relay(State(state): State<Shared>, Json(settings): Json<crate::relay::Settings>) -> Response {
+    match crate::relay::configure(&state,settings).await {
+        Ok(()) => Json(json!({"ok":true})).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST,&format!("{e:#}")),
+    }
+}
 
 #[derive(Deserialize)]
 struct UiSetDir {

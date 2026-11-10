@@ -142,6 +142,7 @@ pub struct PickJob {
 
 pub struct AppState {
     pub transfers: crate::transfers::Manager,
+    pub relay: crate::relay::Runtime,
     pub pulls: crate::shares::PullState,
     pub identity: crate::config::Identity,
     /// 当前保存目录（初值 = identity.download_dir；设置面板可改，写穿 config.json）

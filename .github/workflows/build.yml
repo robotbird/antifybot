@@ -65,6 +65,9 @@ jobs:
       - name: 打包 AntifyBot.app
         run: bash rust/build-app.sh
 
+      - name: 验证局域网与中转链路
+        run: cd rust && cargo test --locked -p antify-rs -p antify-relay
+
       - name: 压缩
         run: cd rust && ditto -c -k --keepParent AntifyBot.app AntifyBot-macOS-arm64.zip
 
@@ -91,3 +94,4 @@ jobs:
         with:
           files: dist/*.zip
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

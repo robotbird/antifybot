@@ -14,6 +14,16 @@ const MSG_KEEP: u64 = 5000;
 
 pub struct Db(Arc<Mutex<Connection>>);
 
+pub struct RelayPending {
+    pub remote_id: String,
+    pub local_id: u64,
+    pub recipient: String,
+    pub body: Option<String>,
+    pub src_path: String,
+    pub name: String,
+    pub size: u64,
+}
+
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
@@ -22,7 +32,8 @@ impl Db {
         let conn = Connection::open(path).with_context(|| format!("打开 {}", path.display()))?;
         // WAL：写穿设备的短事务与面板轮询的读互不阻塞；journal_mode 有返回值需 query_row
         let _mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // A relay ACK must not precede durable local persistence.
+        conn.pragma_update(None, "synchronous", "FULL")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS messages (
                id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,6 +61,15 @@ impl Db {
                version      TEXT NOT NULL DEFAULT '',
                download     INTEGER NOT NULL DEFAULT 0,
                last_seen    INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS relay_outbox (
+               scope TEXT NOT NULL, remote_id TEXT NOT NULL, local_id INTEGER NOT NULL UNIQUE,
+               recipient TEXT NOT NULL, body TEXT, accepted INTEGER NOT NULL DEFAULT 0,
+               PRIMARY KEY(scope,remote_id)
+             );
+             CREATE TABLE IF NOT EXISTS relay_inbox (
+               scope TEXT NOT NULL, remote_id TEXT NOT NULL, received_at INTEGER NOT NULL,
+               PRIMARY KEY(scope,remote_id)
              );",
         )?;
         Ok(Self(Arc::new(Mutex::new(conn))))
@@ -108,7 +128,7 @@ impl Db {
     /// 上次运行残留的 sending 全部落 fail（崩溃/断电时在途的消息让用户手动重试）；返回条数
     pub fn fail_pending_sending(&self) -> usize {
         let Ok(c) = self.0.lock() else { return 0 };
-        c.execute("UPDATE messages SET status='fail' WHERE out=1 AND status='sending'", [])
+        c.execute("UPDATE messages SET status='fail' WHERE out=1 AND status='sending' AND id NOT IN (SELECT local_id FROM relay_outbox)", [])
             .unwrap_or(0)
     }
 
@@ -116,7 +136,7 @@ impl Db {
     pub fn prune(&self) {
         let Ok(c) = self.0.lock() else { return };
         let _ = c.execute(
-            "DELETE FROM messages WHERE id <= (SELECT MAX(id) - ?1 FROM messages)",
+            "DELETE FROM messages WHERE id <= (SELECT MAX(id) - ?1 FROM messages) AND id NOT IN (SELECT local_id FROM relay_outbox)",
             params![MSG_KEEP as i64],
         );
     }
@@ -134,6 +154,86 @@ impl Db {
             ],
         )?;
         Ok(())
+    }
+
+    /// Queue and chat bubble are committed together before any network request.
+    pub fn relay_enqueue(&self, scope: &str, remote_id: &str, recipient: &str, body: Option<&str>, msg: &ChatMsg) -> Result<u64> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        let id = insert_chat(&tx, msg)?;
+        tx.execute("INSERT INTO relay_outbox(scope,remote_id,local_id,recipient,body) VALUES(?1,?2,?3,?4,?5)",
+            params![scope,remote_id,id as i64,recipient,body])?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn relay_pending(&self, scope: &str) -> Result<Vec<RelayPending>> {
+        let c = self.0.lock().unwrap();
+        let mut q = c.prepare("SELECT r.remote_id,r.local_id,r.recipient,r.body,m.src_path,m.name,m.size FROM relay_outbox r JOIN messages m ON m.id=r.local_id WHERE r.scope=?1 AND r.accepted=0 AND m.status!='fail' ORDER BY r.local_id LIMIT 8")?;
+        let rows = q.query_map([scope], |r| Ok(RelayPending {
+            remote_id:r.get(0)?, local_id:r.get::<_,i64>(1)? as u64, recipient:r.get(2)?, body:r.get(3)?,
+            src_path:r.get(4)?, name:r.get(5)?, size:r.get::<_,i64>(6)? as u64,
+        }))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn relay_body(&self, scope: &str, remote_id: &str, body: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("UPDATE relay_outbox SET body=?3 WHERE scope=?1 AND remote_id=?2", params![scope,remote_id,body])?;
+        Ok(())
+    }
+
+    pub fn relay_status(&self, scope: &str, remote_id: &str, status: &str) -> Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        tx.execute("UPDATE messages SET status=?3 WHERE id IN (SELECT local_id FROM relay_outbox WHERE scope=?1 AND remote_id=?2)", params![scope,remote_id,status])?;
+        if status == "accepted" {
+            tx.execute("UPDATE relay_outbox SET accepted=1 WHERE scope=?1 AND remote_id=?2", params![scope,remote_id])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn relay_retry(&self, scope: &str, local_id: u64) -> Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM relay_outbox WHERE scope=?1 AND local_id=?2)", params![scope,local_id as i64], |r| r.get(0))?;
+        anyhow::ensure!(exists, "该消息不属于当前中转账户");
+        tx.execute("UPDATE messages SET status='queued' WHERE id=?1", [local_id as i64])?;
+        tx.execute("UPDATE relay_outbox SET accepted=0 WHERE local_id=?1", [local_id as i64])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn relay_seen(&self, scope: &str, remote_id: &str) -> Result<bool> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM relay_inbox WHERE scope=?1 AND remote_id=?2)", params![scope,remote_id], |r| r.get(0))?)
+    }
+
+    pub fn relay_receive(&self, scope: &str, remote_id: &str, msg: &ChatMsg) -> Result<bool> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        if tx.execute("INSERT OR IGNORE INTO relay_inbox(scope,remote_id,received_at) VALUES(?1,?2,?3)", params![scope,remote_id,crate::state::now_ms() as i64])? == 0 {
+            return Ok(false);
+        }
+        insert_chat(&tx, msg)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Return the local ID/path once, so duplicate receipts don't duplicate notifications.
+    pub fn relay_delivered(&self, scope: &str, remote_id: &str) -> Result<Option<(u64,String)>> {
+        use rusqlite::OptionalExtension;
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        let msg = tx.query_row("SELECT m.id,m.src_path FROM relay_outbox r JOIN messages m ON m.id=r.local_id WHERE r.scope=?1 AND r.remote_id=?2", params![scope,remote_id],
+            |r| Ok((r.get::<_,i64>(0)? as u64,r.get::<_,String>(1)?))).optional()?;
+        if let Some((id,_)) = &msg {
+            tx.execute("UPDATE messages SET status='ok' WHERE id=?1", [*id as i64])?;
+            tx.execute("DELETE FROM relay_outbox WHERE scope=?1 AND remote_id=?2", params![scope,remote_id])?;
+        }
+        tx.commit()?;
+        Ok(msg)
     }
 
     pub fn remove_device(&self, fp: &str) -> Result<()> {
@@ -195,4 +295,10 @@ fn msg_from_row(r: &Row) -> rusqlite::Result<ChatMsg> {
         status: r.get("status")?,
         src_path: r.get("src_path")?,
     })
+}
+
+fn insert_chat(c: &Connection, m: &ChatMsg) -> Result<u64> {
+    c.execute("INSERT INTO messages(out,peer,peer_alias,kind,text,name,size,at,file,status,src_path) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        params![m.out as i64,m.peer,m.peer_alias,m.kind,m.text,m.name,m.size as i64,m.at as i64,m.file,m.status,m.src_path])?;
+    Ok(c.last_insert_rowid() as u64)
 }

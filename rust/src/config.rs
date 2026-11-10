@@ -10,6 +10,14 @@ pub const PROTOCOL_VERSION: &str = "2.1";
 pub const MULTICAST_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 167);
 pub const DEFAULT_PORT: u16 = 53317;
 
+/// Optional isolated profile for testing multiple clients on the same computer.
+pub fn config_dir() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("ANTIFY_CONFIG_DIR").filter(|p| !p.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(dirs::home_dir().context("无法定位用户主目录")?.join(".antifybot-rs"))
+}
+
 #[derive(Serialize, Deserialize)]
 struct ConfigFile {
     alias: String,
@@ -39,7 +47,7 @@ impl Identity {
 
     pub fn load_opts(alias: Option<String>, port: u16, dir: Option<PathBuf>, persist_alias: bool) -> Result<Self> {
         let home = dirs::home_dir().context("无法定位用户主目录")?;
-        let cfg_dir = home.join(".antifybot-rs");
+        let cfg_dir = config_dir()?;
         std::fs::create_dir_all(&cfg_dir).with_context(|| format!("创建 {}", cfg_dir.display()))?;
 
         let cfg_path = cfg_dir.join("config.json");
@@ -143,8 +151,7 @@ impl Identity {
 
 /// 设置面板改保存目录：整写 config.json（保留别名等既有字段）
 pub fn save_download_dir(dir: &std::path::Path) -> Result<()> {
-    let home = dirs::home_dir().context("无法定位用户主目录")?;
-    let cfg_path = home.join(".antifybot-rs").join("config.json");
+    let cfg_path = config_dir()?.join("config.json");
     let mut cfg = std::fs::read_to_string(&cfg_path)
         .ok()
         .and_then(|t| serde_json::from_str::<ConfigFile>(&t).ok())

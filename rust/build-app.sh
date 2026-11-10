@@ -5,6 +5,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
 APP_NAME="AntifyBot"
 APP="AntifyBot.app"
 OUT="$ROOT/$APP"
@@ -45,6 +46,9 @@ cat > "$OUT/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION%%-*}" "$OUT/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$OUT/Contents/Info.plist"
 
 echo "── 3/4 ad-hoc 签名"
 codesign --force --deep --sign - "$OUT" >/dev/null 2>&1 || codesign --force --sign - "$OUT"

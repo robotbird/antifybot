@@ -413,6 +413,11 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .dirrow input{flex:1;min-width:0;font-size:12px;font-family:var(--mono)}
   .dirhint{font-size:11.5px;color:var(--muted);margin:0 0 6px}
   .diracts{display:flex;justify-content:flex-end}
+  .relay-field{display:block;margin:18px 0 6px;font-size:13px;font-weight:600}
+  .relay-input{width:100%;box-sizing:border-box;font:13px var(--mono);padding:10px 12px;
+    border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);outline:none}
+  .relay-input:focus{border-color:var(--ui-blue)}
+  #relay-status{margin:16px 0;font-size:12px;line-height:1.6;overflow-wrap:anywhere;color:var(--muted)}
   .updstate{font-size:11.5px;color:var(--muted);margin-top:1px;min-height:1em}
   .updresult{display:flex;align-items:center;gap:10px;padding:0 0 6px;font-size:12.5px}
   details.nodeinfo{margin-top:4px;border-top:1px dashed var(--line);padding-top:10px}
@@ -582,6 +587,7 @@ try{
       <h3 data-t="setTitle">设置</h3>
       <button class="settab on" type="button" data-set-tab="general" data-t="secGeneral">通用</button>
       <button class="settab" type="button" data-set-tab="storage" data-t="secStorage">存储</button>
+      <button class="settab" type="button" data-set-tab="relay" data-t="secRelay">远程连接</button>
       <button class="settab" type="button" data-set-tab="about" data-t="secAbout">关于</button>
     </nav>
     <div class="setcontent">
@@ -623,6 +629,18 @@ try{
         </div>
       </section>
 
+      <section class="setpanel" data-set-panel="relay" hidden>
+        <h3 data-t="secRelay">远程连接</h3>
+        <div class="srow"><label class="rk" for="relay-enabled" data-t="relayEnable">启用中转服务</label><input id="relay-enabled" type="checkbox"></div>
+        <label class="relay-field" for="relay-url" data-t="relayUrl">服务器地址</label>
+        <input class="relay-input" id="relay-url" type="url" spellcheck="false" placeholder="http://127.0.0.1:53320" autocomplete="off">
+        <label class="relay-field" for="relay-token" data-t="relayToken">设备令牌</label>
+        <input class="relay-input" id="relay-token" type="password" autocomplete="new-password" spellcheck="false">
+        <p class="dirhint" style="margin-top:8px" data-t="relayTokenHint">两台电脑分别使用不同令牌。已保存时留空可保留。</p>
+        <p class="rd" data-t="relayHint">SSH 隧道测试填写 http://127.0.0.1:53320；公网连接填写 HTTPS 地址。</p>
+        <div id="relay-status" role="status" aria-live="polite"></div>
+        <div class="diracts"><button class="btn primary small" id="relay-save" data-t="relaySave">保存并连接</button></div>
+      </section>
       <section class="setpanel" data-set-panel="about" hidden>
         <h3 data-t="secAbout">关于</h3>
         <div class="sect">
@@ -668,6 +686,11 @@ const esc = s => String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;'
 // ── i18n：字典 + 插值 {0}{1}；localStorage 记忆，切换即全量重渲染 ──
 const L = {
   zh: {
+    secRelay:'远程连接', relayEnable:'启用中转服务',relayUrl:'服务器地址',relayToken:'设备令牌',relaySave:'保存并连接',
+    relayTokenHint:'两台电脑分别使用不同令牌。已保存时留空可保留。',relayHint:'SSH 隧道测试填写 http://127.0.0.1:53320；公网连接填写 HTTPS 地址。',
+    relayDisabled:'未启用',relayConnecting:'正在连接，会自动重试…',relayConnected:'已连接 · 设备身份：{0}',relaySaved:'配置已保存',relayTokenSaved:'已保存令牌，留空保留',
+    relayTag:'中转',relayQueued:'已加入发送队列',stQueued:'⏳ 等待连接 / 发送',stAccepted:'⏳ 服务端已接收，等待对方保存',
+    relayFolderUnsupported:'远程连接暂支持文件和文字，文件夹共享仍需局域网连接',
     app:'蚂蚁快传', devices:'设备', settings:'设置',
     devEmpty:'等待设备上线', devEmptySub:'同一网络下自动发现',
     removeDev:'从列表移除',
@@ -718,6 +741,11 @@ const L = {
     copyFp:'复制指纹', fpCopied:'指纹已复制', close:'关闭',
   },
   en: {
+    secRelay:'Remote connection',relayEnable:'Enable relay',relayUrl:'Server URL',relayToken:'Device token',relaySave:'Save and connect',
+    relayTokenHint:'Use a different token on each Mac. Leave blank to keep the saved token.',relayHint:'SSH tunnel: http://127.0.0.1:53320. Use HTTPS for public servers.',
+    relayDisabled:'Disabled',relayConnecting:'Connecting; retrying automatically…',relayConnected:'Connected · Device: {0}',relaySaved:'Configuration saved',relayTokenSaved:'Token saved; leave blank to keep',
+    relayTag:'Relay',relayQueued:'Added to send queue',stQueued:'⏳ Waiting to connect / send',stAccepted:'⏳ Server accepted; waiting for recipient',
+    relayFolderUnsupported:'Remote connections support messages and files. Folder shares require a LAN connection.',
     app:'AntifyBot', devices:'Devices', settings:'Settings',
     devEmpty:'Waiting for devices', devEmptySub:'Auto-discovered on this network',
     removeDev:'Remove from list',
@@ -812,6 +840,7 @@ const formatAddress = (ip, port) => {
   return host && p ? `${host}:${p}` : host;
 };
 const deviceMeta = d => {
+  if (d.transport === 'relay') return t('relayTag') + (d.online ? '' : ' · ' + t('offline'));
   const address = formatAddress(d.ip, d.port);
   return d.online ? address : [address, t('offline')].filter(Boolean).join(' · ');
 };
@@ -911,6 +940,7 @@ function hasFiles(e){
 
 function render(s){
   window._state = s;
+  renderRelayStatus(s.relay || {});
   const me = s.me || {};
   const selfFp = me.fingerprint || '';
   const selfIps = me.ips || [];
@@ -963,7 +993,7 @@ function render(s){
       const x = document.createElement('button'); x.className = 'xbtn';
       x.textContent = '✕'; x.title = t('removeDev');
       x.onclick = e => { e.stopPropagation(); removeDevice(d); };
-      row.append(ico, mid, x);
+      row.append(ico, mid); if (d.transport !== 'relay') row.appendChild(x);
       row.onclick = () => { sel = (sel === d.fingerprint ? null : d.fingerprint); syncSel(); };
       // 拖放反馈只在右侧主区：设备行不再定向投放/高亮，左侧列表拖动中零变化
       box.appendChild(row);
@@ -1060,7 +1090,7 @@ function renderCenter(s){
   $('waitview').hidden = !!d;
   // 本机会话仅文字：文件 / 文件夹按钮停用（剪贴板按钮保留——粘贴文本仍可用）
   $('btn-cfile').disabled = isSelf;
-  $('btn-cfolder').disabled = isSelf;
+  $('btn-cfolder').disabled = isSelf || !!(d && d.transport === 'relay');
   if (d){
     let meta, alias;
     if (isSelf){
@@ -1194,6 +1224,8 @@ function renderChat(s){
     if (m.out && !isSelf){ // 出站消息状态行：⏳ 发送中 / ✓ 已送达 / ⚠ 未送达（文本与带源路径的可重试；本机即时落库无需状态）
       const st = document.createElement('div'); st.className = 'st';
       if (m.status === 'sending') st.textContent = t('stSending');
+      else if (m.status === 'queued') st.textContent = t('stQueued');
+      else if (m.status === 'accepted') st.textContent = t('stAccepted');
       else if (m.status === 'ok') st.textContent = t('stOk');
       else if (m.status === 'fail'){
         if (m.kind === 'text' || m.srcPath){
@@ -1245,7 +1277,7 @@ async function sendFiles(fp, files){
                 `&size=${f.size}&mime=${encodeURIComponent(f.type||'application/octet-stream')}`;
       const r = await fetch('/api/ui/send?' + q, {method:'POST', body:f});
       const v = await r.json().catch(()=>({}));
-      if (r.ok) toast(t('sentT', f.name));
+      if (r.ok) toast(v.queued ? t('relayQueued') : t('sentT', f.name));
       else { toast(v.error || t('sendFail'), true); break; }
     }catch(e){ toast(t('sendFail')+'：'+e.message, true); break; }
   }
@@ -1404,6 +1436,7 @@ async function shareApi(path, body){
   const v = await r.json(); if (!r.ok) throw new Error(v.error || r.status); return v;
 }
 async function publishFolder(fp){
+  if (String(fp).startsWith('relay:')) return toast(t('relayFolderUnsupported'), true);
   if (isSelfTarget(fp)) return toast(t('selfNoFiles'), true);
   try {
     let paths;
@@ -1416,6 +1449,7 @@ async function publishFolder(fp){
 // 发送方流程保持简单：确认后发布共享并把邀请发进会话；后续进度、日志都在
 // 对方接收卡里（本版不回传接收进度，卡片文案已明确说明）。
 async function prepareFolderOffer(fp, path){
+  if (String(fp).startsWith('relay:')) return toast(t('relayFolderUnsupported'), true);
   if (!confirm(shareText('confirm'))) return;
   try {
     const v = await shareApi('shares', {path});
@@ -1576,7 +1610,7 @@ function openText(preselect){
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({target: cur, text})});
       const v = await r.json().catch(()=>({}));
-      if (r.ok){ toast(t('textSent')); $('textdlg').close(); }
+      if (r.ok){ toast(v.queued ? t('relayQueued') : t('textSent')); $('textdlg').close(); }
       else toast(v.error || t('sendFail'), true);
     }catch(e){ toast(t('sendFail')+'：'+e.message, true); }
     $('textsend').disabled = false;
@@ -1744,6 +1778,12 @@ $('btn-settings').onclick = () => {
   $('st-ver').textContent = 'LocalSend v' + me.version;
   $('st-appver').textContent = 'v' + (me.appVersion || '?');
   $('set-dir').value = me.dir;
+  const relay = window._state.relay || {};
+  $('relay-enabled').checked = !!relay.enabled;
+  $('relay-url').value = relay.server_url || 'http://127.0.0.1:53320';
+  $('relay-token').value = '';
+  $('relay-token').placeholder = relay.has_token ? t('relayTokenSaved') : '';
+  renderRelayStatus(relay);
   updUrl = '';
   $('upd-state').textContent = '';
   $('updresult').hidden = true;
@@ -1752,6 +1792,24 @@ $('btn-settings').onclick = () => {
   $('setdlg').showModal();
 };
 $('setclose').onclick = () => $('setdlg').close();
+
+function renderRelayStatus(relay){
+  const el = $('relay-status'); if (!el) return;
+  el.textContent = !relay.enabled ? t('relayDisabled') : relay.connected ? t('relayConnected',relay.device_id || '') : t('relayConnecting');
+  if (relay.error) el.textContent += ' · ' + relay.error;
+}
+$('relay-save').onclick = async () => {
+  const btn = $('relay-save'); btn.disabled = true;
+  try {
+    const r = await fetch('/api/ui/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      enabled:$('relay-enabled').checked,server_url:$('relay-url').value.trim(),token:$('relay-token').value.trim()
+    })});
+    const v = await r.json(); if (!r.ok) throw new Error(v.error || r.status);
+    $('relay-token').value = ''; $('relay-token').placeholder = t('relayTokenSaved');
+    toast(t('relaySaved')); await poll();
+  } catch(e) { toast(e.message,true); }
+  finally { btn.disabled = false; }
+};
 
 $('st-copy').onclick = () => {
   const txt = $('st-fp').textContent;
