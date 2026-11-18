@@ -54,3 +54,70 @@ pub struct FileInfo {
     pub sha256: String,
     pub expires_at: i64,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DirectDevice {
+    pub id: String,
+    pub alias: String,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DirectRequest {
+    Register {
+        alias: String,
+        certificate: String,
+        signature: String,
+    },
+    Signal {
+        to: String,
+        session: String,
+        offer: bool,
+        sdp: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DirectEvent {
+    Challenge {
+        device_id: String,
+        nonce: String,
+    },
+    Devices {
+        devices: Vec<DirectDevice>,
+    },
+    Signal {
+        from: DirectDevice,
+        session: String,
+        offer: bool,
+        sdp: String,
+    },
+    Rejected {
+        session: String,
+    },
+}
+
+pub fn identity_proof(device: &str, nonce: &str, alias: &str, fingerprint: &str) -> Vec<u8> {
+    format!("AntifyBot p2p identity v1\n{device}\n{nonce}\n{fingerprint}\n{alias}").into_bytes()
+}
+
+pub fn direct_sdp(sdp: &str) -> bool {
+    sdp.len() <= 48 * 1024
+        && sdp.lines().filter(|line| line.starts_with("m=")).eq(sdp
+            .lines()
+            .filter(|line| line.starts_with("m=application ")))
+        && sdp
+            .lines()
+            .filter(|line| line.starts_with("a=candidate:"))
+            .all(|line| {
+                matches!(
+                    line.split_ascii_whitespace().nth(7),
+                    Some("host" | "srflx" | "prflx")
+                )
+            })
+}
+
+/// Signal marker for a paired HTTPS data connection.
+pub const HTTPS_RELAY: &str = "antify-https-relay-v1";

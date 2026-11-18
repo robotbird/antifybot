@@ -67,10 +67,19 @@ impl Db {
                recipient TEXT NOT NULL, body TEXT, accepted INTEGER NOT NULL DEFAULT 0,
                PRIMARY KEY(scope,remote_id)
              );
+             CREATE TABLE IF NOT EXISTS direct_failures (
+               local_id INTEGER PRIMARY KEY, reason TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS direct_devices (
+               scope TEXT NOT NULL, id TEXT NOT NULL, alias TEXT NOT NULL, fingerprint TEXT NOT NULL,
+               PRIMARY KEY(scope,id), UNIQUE(scope,fingerprint)
+             );
              CREATE TABLE IF NOT EXISTS relay_inbox (
                scope TEXT NOT NULL, remote_id TEXT NOT NULL, received_at INTEGER NOT NULL,
                PRIMARY KEY(scope,remote_id)
-             );",
+             );
+             UPDATE messages SET status='fail' WHERE status='accepted'
+             AND id IN (SELECT local_id FROM relay_outbox WHERE accepted=1);",
         )?;
         Ok(Self(Arc::new(Mutex::new(conn))))
     }
@@ -167,20 +176,109 @@ impl Db {
         Ok(id)
     }
 
-    pub fn relay_pending(&self, scope: &str) -> Result<Vec<RelayPending>> {
+    pub fn direct_devices(&self, scope: &str) -> Result<Vec<antify_protocol::DirectDevice>> {
         let c = self.0.lock().unwrap();
-        let mut q = c.prepare("SELECT r.remote_id,r.local_id,r.recipient,r.body,m.src_path,m.name,m.size FROM relay_outbox r JOIN messages m ON m.id=r.local_id WHERE r.scope=?1 AND r.accepted=0 AND m.status!='fail' ORDER BY r.local_id LIMIT 8")?;
-        let rows = q.query_map([scope], |r| Ok(RelayPending {
-            remote_id:r.get(0)?, local_id:r.get::<_,i64>(1)? as u64, recipient:r.get(2)?, body:r.get(3)?,
-            src_path:r.get(4)?, name:r.get(5)?, size:r.get::<_,i64>(6)? as u64,
-        }))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut q = c.prepare("SELECT id,alias,fingerprint FROM direct_devices WHERE scope=?1")?;
+        let rows = q
+            .query_map([scope], |r| {
+                Ok(antify_protocol::DirectDevice {
+                    id: r.get(0)?,
+                    alias: r.get(1)?,
+                    fingerprint: r.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
-    pub fn relay_body(&self, scope: &str, remote_id: &str, body: &str) -> Result<()> {
-        let c = self.0.lock().unwrap();
-        c.execute("UPDATE relay_outbox SET body=?3 WHERE scope=?1 AND remote_id=?2", params![scope,remote_id,body])?;
+    pub fn bind_direct_device(
+        &self,
+        scope: &str,
+        device: &antify_protocol::DirectDevice,
+    ) -> Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let same: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM direct_devices WHERE scope=?1 AND id=?2 AND alias=?3 AND fingerprint=?4)",
+            params![scope,device.id,device.alias,device.fingerprint], |r| r.get(0),
+        )?;
+        if same {
+            return Ok(());
+        }
+        let tx = c.transaction()?;
+        let changed = tx.execute(
+            "INSERT INTO direct_devices(scope,id,alias,fingerprint) VALUES(?1,?2,?3,?4)
+             ON CONFLICT(scope,id) DO UPDATE SET alias=excluded.alias
+             WHERE direct_devices.fingerprint=excluded.fingerprint",
+            params![scope, device.id, device.alias, device.fingerprint],
+        )?;
+        anyhow::ensure!(changed == 1, "公网设备证书发生变化，无法关联原会话");
+        tx.execute(
+            "UPDATE messages SET peer=?1 WHERE peer=?2",
+            params![device.fingerprint, format!("relay:{scope}:{}", device.id)],
+        )?;
+        tx.commit()?;
         Ok(())
+    }
+
+    pub fn relay_pending(
+        &self,
+        scope: &str,
+        online: &std::collections::HashSet<String>,
+        kind: &str,
+    ) -> Result<Vec<RelayPending>> {
+        let c = self.0.lock().unwrap();
+        let mut q = c.prepare("SELECT r.remote_id,r.local_id,r.recipient,r.body,m.src_path,m.name,m.size FROM relay_outbox r JOIN messages m ON m.id=r.local_id WHERE r.scope=?1 AND r.accepted=0 AND m.status!='fail' AND m.kind=?3 AND r.recipient IN (SELECT value FROM json_each(?2)) ORDER BY r.local_id LIMIT 8")?;
+        let rows = q
+            .query_map(params![scope, serde_json::to_string(online)?, kind], |r| {
+                Ok(RelayPending {
+                    remote_id: r.get(0)?,
+                    local_id: r.get::<_, i64>(1)? as u64,
+                    recipient: r.get(2)?,
+                    body: r.get(3)?,
+                    src_path: r.get(4)?,
+                    name: r.get(5)?,
+                    size: r.get::<_, i64>(6)? as u64,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn is_direct_task(&self, local_id: u64) -> bool {
+        let c = self.0.lock().unwrap();
+        c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM relay_outbox WHERE local_id=?1)",
+            [local_id as i64],
+            |r| r.get(0),
+        )
+        .unwrap_or(false)
+    }
+
+    pub fn direct_fail(&self, scope: &str, remote_id: &str, reason: &str) -> Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO direct_failures(local_id,reason)
+             SELECT local_id,?3 FROM relay_outbox WHERE scope=?1 AND remote_id=?2",
+            params![scope, remote_id, reason],
+        )?;
+        tx.execute(
+            "UPDATE messages SET status='fail' WHERE id IN
+             (SELECT local_id FROM relay_outbox WHERE scope=?1 AND remote_id=?2)",
+            params![scope, remote_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn direct_failures(&self) -> std::collections::HashMap<u64, String> {
+        let c = self.0.lock().unwrap();
+        let Ok(mut stmt) = c.prepare("SELECT local_id,reason FROM direct_failures") else {
+            return Default::default();
+        };
+        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)? as u64, r.get(1)?)))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
     }
 
     pub fn relay_status(&self, scope: &str, remote_id: &str, status: &str) -> Result<()> {
@@ -199,8 +297,18 @@ impl Db {
         let tx = c.transaction()?;
         let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM relay_outbox WHERE scope=?1 AND local_id=?2)", params![scope,local_id as i64], |r| r.get(0))?;
         anyhow::ensure!(exists, "该消息不属于当前中转账户");
-        tx.execute("UPDATE messages SET status='queued' WHERE id=?1", [local_id as i64])?;
-        tx.execute("UPDATE relay_outbox SET accepted=0 WHERE local_id=?1", [local_id as i64])?;
+        tx.execute(
+            "UPDATE messages SET status='queued' WHERE id=?1",
+            [local_id as i64],
+        )?;
+        tx.execute(
+            "DELETE FROM direct_failures WHERE local_id=?1",
+            [local_id as i64],
+        )?;
+        tx.execute(
+            "UPDATE relay_outbox SET accepted=0 WHERE local_id=?1",
+            [local_id as i64],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -230,7 +338,14 @@ impl Db {
             |r| Ok((r.get::<_,i64>(0)? as u64,r.get::<_,String>(1)?))).optional()?;
         if let Some((id,_)) = &msg {
             tx.execute("UPDATE messages SET status='ok' WHERE id=?1", [*id as i64])?;
-            tx.execute("DELETE FROM relay_outbox WHERE scope=?1 AND remote_id=?2", params![scope,remote_id])?;
+            tx.execute(
+                "DELETE FROM direct_failures WHERE local_id=?1",
+                [*id as i64],
+            )?;
+            tx.execute(
+                "DELETE FROM relay_outbox WHERE scope=?1 AND remote_id=?2",
+                params![scope, remote_id],
+            )?;
         }
         tx.commit()?;
         Ok(msg)

@@ -3,7 +3,7 @@ members = ["gui", "relay", "protocol"]
 
 [package]
 name = "antify-rs"
-version = "1.5.0-rc.1"
+version = "1.5.0-rc.7"
 edition = "2021"
 description = "AntifyBot Rust 节点：LocalSend v2 协议实现（发现 / 接收 / 发送）"
 
@@ -16,6 +16,9 @@ name = "antify-rs"
 path = "src/main.rs"
 
 [dependencies]
+webrtc = "0.17.1"
+webrtc-data = "0.17.1"
+ring = "0.17"
 antify-protocol = { path = "protocol" }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 tokio = { version = "1", features = ["full"] }

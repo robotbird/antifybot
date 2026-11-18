@@ -1,3 +1,4 @@
+mod direct;
 mod files;
 pub mod protocol;
 mod store;
@@ -103,6 +104,7 @@ struct Inner {
     db: store::Store,
     changed: Notify,
     online: Mutex<HashMap<String, usize>>,
+    direct: direct::Registry,
 }
 impl App {
     pub async fn open(config: Config) -> anyhow::Result<Self> {
@@ -151,6 +153,7 @@ impl App {
             db,
             changed: Notify::new(),
             online: Mutex::new(HashMap::new()),
+            direct: Default::default(),
         }));
         app.cleanup(true).await.map_err(|e| anyhow::anyhow!(e.1))?;
         Ok(app)
@@ -243,6 +246,7 @@ pub fn router(app: App) -> Router {
         .route("/health", get(|| async { Json(serde_json::json!({"ok":true,"service":"antify-relay","version":env!("CARGO_PKG_VERSION")})) }))
         .route("/v1/devices", get(devices))
         .route("/v1/ws", get(upgrade))
+        .route("/v1/p2p", get(direct::upgrade))
         .route("/v1/messages", get(inbox).post(send_message))
         .route("/v1/messages/{id}/ack", post(ack))
         .route("/v1/files", post(files::upload))

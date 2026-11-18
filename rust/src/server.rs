@@ -1007,7 +1007,21 @@ async fn ui_state(State(state): State<Shared>, Query(q): Query<UiStateQuery>) ->
             })
             .collect()
     };
-    devices.extend(crate::relay::devices(&state).await);
+    for remote in crate::relay::devices(&state).await {
+        if let Some(local) = devices
+            .iter_mut()
+            .find(|d| d["fingerprint"] == remote["fingerprint"])
+        {
+            local["p2p"] = json!(true);
+            local["legacyPeer"] = remote["legacyPeer"].clone();
+            if local["online"] != true {
+                local["online"] = remote["online"].clone();
+                local["transport"] = json!("p2p");
+            }
+        } else {
+            devices.push(remote);
+        }
+    }
     let relay = crate::relay::view(&state).await;
     let received: Vec<serde_json::Value> = {
         let rec = state.received.lock().await;
@@ -1045,6 +1059,8 @@ async fn ui_state(State(state): State<Shared>, Query(q): Query<UiStateQuery>) ->
         }
     };
     let sending = state.sending.lock().await.clone();
+    let p2p_sending = state.relay.progress.lock().unwrap().clone();
+    let failures = state.db.direct_failures();
     let chat: Vec<serde_json::Value> = state
         .db
         .recent_msgs(200)
@@ -1053,7 +1069,7 @@ async fn ui_state(State(state): State<Shared>, Query(q): Query<UiStateQuery>) ->
             json!({
                 "id": m.id, "out": m.out, "peer": m.peer, "alias": m.peer_alias,
                 "kind": m.kind, "text": m.text, "name": m.name, "size": m.size,
-                "at": m.at, "file": m.file, "status": m.status, "srcPath": m.src_path,
+                "at": m.at, "file": m.file, "status": m.status, "srcPath": m.src_path, "failure": failures.get(&m.id),
             })
         })
         .collect();
@@ -1077,6 +1093,8 @@ async fn ui_state(State(state): State<Shared>, Query(q): Query<UiStateQuery>) ->
         "events": events,
         "session": session,
         "sending": sending,
+        "p2pSending": p2p_sending,
+        "p2pReceiving": state.relay.receiving_files(),
         "chat": chat,
     }))
     .into_response()
@@ -1096,8 +1114,16 @@ async fn ui_send(
     Query(q): Query<UiSendQuery>,
     req: Request,
 ) -> Response {
-    if crate::relay::is_remote(&q.target) {
-        return match crate::relay::enqueue_stream(&state,&q.target,q.name.unwrap_or_else(||"file.bin".into()),q.size.unwrap_or(0),req.into_body()).await {
+    if crate::relay::route_remote(&state, &q.target).await {
+        return match crate::relay::enqueue_stream(
+            &state,
+            &q.target,
+            q.name.unwrap_or_else(|| "file.bin".into()),
+            q.size.unwrap_or(0),
+            req.into_body(),
+        )
+        .await
+        {
             Ok(id) => Json(json!({"ok":true,"id":id,"queued":true})).into_response(),
             Err(e) => err_json(StatusCode::BAD_REQUEST,&format!("{e:#}")),
         };
@@ -1280,9 +1306,12 @@ struct UiSendText {
     text: String,
 }
 
-async fn ui_send_text(State(state): State<Shared>, axum::Json(body): axum::Json<UiSendText>) -> Response {
-    if crate::relay::is_remote(&body.target) {
-        return match crate::relay::enqueue_text(&state,&body.target,body.text).await {
+async fn ui_send_text(
+    State(state): State<Shared>,
+    axum::Json(body): axum::Json<UiSendText>,
+) -> Response {
+    if crate::relay::route_remote(&state, &body.target).await {
+        return match crate::relay::enqueue_text(&state, &body.target, body.text).await {
             Ok(id) => Json(json!({"ok":true,"id":id,"queued":true})).into_response(),
             Err(e) => err_json(StatusCode::BAD_REQUEST,&format!("{e:#}")),
         };
@@ -1463,8 +1492,11 @@ struct UiSendPath {
 
 /// 按本机路径发送（原生选择器返回的路径，或重试）：目录递归展开为多个独立气泡，
 /// 每条消息记录 src_path（重试从原路径重读重发，不复制缓存副本）
-async fn ui_send_path(State(state): State<Shared>, axum::Json(body): axum::Json<UiSendPath>) -> Response {
-    if crate::relay::is_remote(&body.target) {
+async fn ui_send_path(
+    State(state): State<Shared>,
+    axum::Json(body): axum::Json<UiSendPath>,
+) -> Response {
+    if crate::relay::route_remote(&state, &body.target).await {
         let files = match collect_files(std::path::Path::new(&body.path)) {
             Ok(files) if !files.is_empty() && files.len()<=1000 => files,
             Ok(_) => return err_json(StatusCode::BAD_REQUEST,"请选择 1..1000 个文件"),
@@ -1567,8 +1599,8 @@ async fn ui_retry(State(state): State<Shared>, axum::Json(body): axum::Json<UiRe
     if m.status != "fail" {
         return err_json(StatusCode::BAD_REQUEST, "该消息已送达");
     }
-    if crate::relay::is_remote(&m.peer) {
-        return match crate::relay::retry(&state,body.id).await {
+    if state.db.is_direct_task(body.id) || crate::relay::is_remote(&m.peer) {
+        return match crate::relay::retry(&state, body.id).await {
             Ok(()) => Json(json!({"ok":true,"queued":true})).into_response(),
             Err(e) => err_json(StatusCode::BAD_REQUEST,&format!("{e:#}")),
         };

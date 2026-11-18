@@ -313,6 +313,8 @@ pub const DASHBOARD: &str = r##"<!doctype html>
     padding:16px 18px;box-shadow:var(--shadow)}
   .prog .row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:13.5px}
   .prog .row b{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .prog .transfer-caption{display:flex;align-items:baseline;gap:8px;min-width:0}
+  .prog .transfer-rate{color:var(--muted);font-family:var(--mono);font-size:12px;white-space:nowrap;flex:none}
   /* 进度卡右上 ✕：取消传输（发送侧置取消标志；接收侧清会话 + 短期拒收） */
   .prog .xbtn{flex:none;align-self:center;width:22px;height:22px;border:none;border-radius:50%;
     background:transparent;color:var(--muted);font-size:12px;line-height:1;display:grid;
@@ -416,6 +418,9 @@ pub const DASHBOARD: &str = r##"<!doctype html>
   .relay-field{display:block;margin:18px 0 6px;font-size:13px;font-weight:600}
   .relay-input{width:100%;box-sizing:border-box;font:13px var(--mono);padding:10px 12px;
     border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);outline:none}
+  .p2p-name{display:inline-flex;align-items:center;gap:5px;max-width:100%;min-width:0;vertical-align:middle}
+  .p2p-name>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .p2p-globe{display:inline-flex;flex:none;color:var(--muted)}
   .relay-input:focus{border-color:var(--ui-blue)}
   #relay-status{margin:16px 0;font-size:12px;line-height:1.6;overflow-wrap:anywhere;color:var(--muted)}
   .updstate{font-size:11.5px;color:var(--muted);margin-top:1px;min-height:1em}
@@ -632,12 +637,13 @@ try{
       <section class="setpanel" data-set-panel="relay" hidden>
         <h3 data-t="secRelay">远程连接</h3>
         <div class="srow"><label class="rk" for="relay-enabled" data-t="relayEnable">启用中转服务</label><input id="relay-enabled" type="checkbox"></div>
+        <div class="srow"><label class="rk" for="prefer-p2p" data-t="preferP2p">跨网络使用点对点直传</label><input id="prefer-p2p" type="checkbox"></div>
         <label class="relay-field" for="relay-url" data-t="relayUrl">服务器地址</label>
-        <input class="relay-input" id="relay-url" type="url" spellcheck="false" placeholder="http://127.0.0.1:53320" autocomplete="off">
+        <input class="relay-input" id="relay-url" type="url" spellcheck="false" placeholder="https://p2p.bjjxysbz.com" autocomplete="off">
         <label class="relay-field" for="relay-token" data-t="relayToken">设备令牌</label>
         <input class="relay-input" id="relay-token" type="password" autocomplete="new-password" spellcheck="false">
         <p class="dirhint" style="margin-top:8px" data-t="relayTokenHint">两台电脑分别使用不同令牌。已保存时留空可保留。</p>
-        <p class="rd" data-t="relayHint">SSH 隧道测试填写 http://127.0.0.1:53320；公网连接填写 HTTPS 地址。</p>
+        <p class="rd" data-t="relayHint">默认通过公网 HTTPS 连接，请使用本机的设备令牌。</p>
         <div id="relay-status" role="status" aria-live="polite"></div>
         <div class="diracts"><button class="btn primary small" id="relay-save" data-t="relaySave">保存并连接</button></div>
       </section>
@@ -687,9 +693,9 @@ const esc = s => String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;'
 const L = {
   zh: {
     secRelay:'远程连接', relayEnable:'启用中转服务',relayUrl:'服务器地址',relayToken:'设备令牌',relaySave:'保存并连接',
-    relayTokenHint:'两台电脑分别使用不同令牌。已保存时留空可保留。',relayHint:'SSH 隧道测试填写 http://127.0.0.1:53320；公网连接填写 HTTPS 地址。',
+    relayTokenHint:'两台电脑分别使用不同令牌。已保存时留空可保留。',relayHint:'默认通过公网 HTTPS 连接，请使用本机的设备令牌。',
     relayDisabled:'未启用',relayConnecting:'正在连接，会自动重试…',relayConnected:'已连接 · 设备身份：{0}',relaySaved:'配置已保存',relayTokenSaved:'已保存令牌，留空保留',
-    relayTag:'中转',relayQueued:'已加入发送队列',stQueued:'⏳ 等待连接 / 发送',stAccepted:'⏳ 服务端已接收，等待对方保存',
+    p2pReceiving:'正在接收',p2pVerifying:'正在校验',p2pFileType:'文件',p2pCapability:'支持点对点传输',p2pRoute:'点对点直传',httpsRelay:'HTTPS 中转',preferP2p:'跨网络使用点对点直传',lanRoute:'局域网直传',p2pConnecting:'正在建立点对点连接',httpsRelayConnecting:'正在连接 HTTPS 中转',p2pFailed:'无法完成点对点传输 ',p2pResume:'连接中断，等待续传',relayTag:'中转',relayQueued:'已加入发送队列',stQueued:'⏳ 等待连接 / 发送',stAccepted:'⏳ 服务端已接收，等待对方保存',
     relayFolderUnsupported:'远程连接暂支持文件和文字，文件夹共享仍需局域网连接',
     app:'蚂蚁快传', devices:'设备', settings:'设置',
     devEmpty:'等待设备上线', devEmptySub:'同一网络下自动发现',
@@ -742,9 +748,9 @@ const L = {
   },
   en: {
     secRelay:'Remote connection',relayEnable:'Enable relay',relayUrl:'Server URL',relayToken:'Device token',relaySave:'Save and connect',
-    relayTokenHint:'Use a different token on each Mac. Leave blank to keep the saved token.',relayHint:'SSH tunnel: http://127.0.0.1:53320. Use HTTPS for public servers.',
+    relayTokenHint:'Use a different token on each Mac. Leave blank to keep the saved token.',relayHint:'Connect over HTTPS using this Mac’s device token.',
     relayDisabled:'Disabled',relayConnecting:'Connecting; retrying automatically…',relayConnected:'Connected · Device: {0}',relaySaved:'Configuration saved',relayTokenSaved:'Token saved; leave blank to keep',
-    relayTag:'Relay',relayQueued:'Added to send queue',stQueued:'⏳ Waiting to connect / send',stAccepted:'⏳ Server accepted; waiting for recipient',
+    p2pReceiving:'Receiving',p2pVerifying:'Verifying',p2pFileType:'File',p2pCapability:'Supports peer-to-peer transfers',p2pRoute:'Peer-to-peer',httpsRelay:'HTTPS relay',preferP2p:'Use peer-to-peer across networks',lanRoute:'Direct LAN',p2pConnecting:'Establishing peer-to-peer connection',httpsRelayConnecting:'Connecting to HTTPS relay',p2pFailed:'Peer-to-peer transfer failed ',p2pResume:'Connection interrupted, waiting to resume',relayTag:'Relay',relayQueued:'Added to send queue',stQueued:'⏳ Waiting to connect / send',stAccepted:'⏳ Server accepted; waiting for recipient',
     relayFolderUnsupported:'Remote connections support messages and files. Folder shares require a LAN connection.',
     app:'AntifyBot', devices:'Devices', settings:'Settings',
     devEmpty:'Waiting for devices', devEmptySub:'Auto-discovered on this network',
@@ -839,8 +845,18 @@ const formatAddress = (ip, port) => {
   const p = port == null ? '' : String(port).trim();
   return host && p ? `${host}:${p}` : host;
 };
+function deviceName(el, name, p2p){
+  el.textContent = name;
+  if (!p2p) return;
+  const wrap = document.createElement('span'); wrap.className = 'p2p-name';
+  const label = document.createElement('span'); label.textContent = name;
+  const icon = document.createElement('span'); icon.className = 'p2p-globe';
+  icon.title = t('p2pCapability'); icon.setAttribute('role','img'); icon.setAttribute('aria-label',icon.title);
+  icon.innerHTML = '<svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></svg>';
+  wrap.append(label,icon); el.replaceChildren(wrap);
+}
 const deviceMeta = d => {
-  if (d.transport === 'relay') return t('relayTag') + (d.online ? '' : ' · ' + t('offline'));
+  if (d.transport === 'p2p') return d.online ? '' : t('offline');
   const address = formatAddress(d.ip, d.port);
   return d.online ? address : [address, t('offline')].filter(Boolean).join(' · ');
 };
@@ -938,6 +954,34 @@ function hasFiles(e){
   return !!(e.dataTransfer && [...(e.dataTransfer.types||[])].includes('Files'));
 }
 
+const uploadRates = new Map();
+
+function uploadRate(route, progress, now){
+  if (!progress?.active){
+    uploadRates.delete(route);
+    return '';
+  }
+  let samples = uploadRates.get(route);
+  if (!samples || samples.started !== progress.started_at || samples.name !== progress.file_name
+      || progress.sent < samples.points[samples.points.length - 1].sent){
+    samples = {started:progress.started_at, name:progress.file_name, points:[{at:now,sent:progress.sent}]};
+    uploadRates.set(route, samples);
+  }
+  const points = samples.points;
+  if (progress.sent > points[points.length - 1].sent){
+    points.push({at:now,sent:progress.sent});
+    while (points.length > 2 && points[1].at < now - 5000) points.shift();
+  }
+  const last = points[points.length - 1];
+  const stallMs = route === 'p2pRoute' ? 30000 : 5000;
+  const seconds = (last.at - points[0].at) / 1000;
+  const rate = seconds > 0 && now - last.at < stallMs ? (last.sent - points[0].sent) / seconds : 0;
+  const [value, unit] = rate >= 1000000000 ? [rate/1000000000,'GB/s']
+    : rate >= 1000000 ? [rate/1000000,'MB/s']
+    : rate >= 1000 ? [rate/1000,'KB/s'] : [rate,'B/s'];
+  return value.toFixed(value < 10 && unit !== 'B/s' ? 1 : 0).replace(/\.0$/, '') + unit;
+}
+
 function render(s){
   window._state = s;
   renderRelayStatus(s.relay || {});
@@ -956,7 +1000,7 @@ function render(s){
   // 防抖 key：lastSeenMs 每轮轮询都在变，按分钟分桶；identity/在线态/预览 id 变了才重绘
   const dj = lang + ':' + me.alias + ':' + selfAddrs.join(',') + ':' +
     ((lastByFp[selfFp]||{}).id||0) + '|' + s.devices.map(d =>
-    d.fingerprint + ':' + d.alias + ':' + d.ip + ':' + (d.online?1:0) + ':' +
+    d.fingerprint + ':' + d.alias + ':' + !!d.p2p + ':' + (d.transport || '') + ':' + d.ip + ':' + (d.online?1:0) + ':' +
     Math.floor(d.lastSeenMs/60000) + ':' + ((lastByFp[d.fingerprint]||{}).id||0)
   ).join('|');
   if (dj !== lastDevJson){
@@ -986,14 +1030,14 @@ function render(s){
       row.dataset.fp = d.fingerprint; row.tabIndex = 0; row.title = displayAlias(d.alias);
       const ico = document.createElement('div'); ico.className = 'ico'; ico.innerHTML = devIcon(d);
       const mid = document.createElement('div'); mid.className = 'mid';
-      const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = displayAlias(d.alias);
+      const nm = document.createElement('div'); nm.className = 'nm'; deviceName(nm, displayAlias(d.alias), d.p2p);
       const meta = document.createElement('div'); meta.className = 'meta';
       meta.textContent = deviceMeta(d);
       mid.append(nm, meta);
       const x = document.createElement('button'); x.className = 'xbtn';
       x.textContent = '✕'; x.title = t('removeDev');
       x.onclick = e => { e.stopPropagation(); removeDevice(d); };
-      row.append(ico, mid); if (d.transport !== 'relay') row.appendChild(x);
+      row.append(ico, mid); if (d.transport !== 'p2p') row.appendChild(x);
       row.onclick = () => { sel = (sel === d.fingerprint ? null : d.fingerprint); syncSel(); };
       // 拖放反馈只在右侧主区：设备行不再定向投放/高亮，左侧列表拖动中零变化
       box.appendChild(row);
@@ -1017,22 +1061,34 @@ function render(s){
   }
 
   // 选中设备被移除 → 回到等待屏（离线设备保留在列表，不触发；本机是钉住项，不参与）
-  if (sel && sel !== selfFp && !s.devices.some(d => d.fingerprint === sel)) sel = null;
+  if (sel && sel !== selfFp && !s.devices.some(d => d.fingerprint === sel)) sel = s.devices.find(d => d.legacyPeer === sel)?.fingerprint || null;
   // 正在收文件且没开任何会话 → 自动切到发送者的会话（进度卡可见）
   if (!sel && s.session && s.session.active){
     const d = (s.devices||[]).find(x => x.ip === s.session.senderIp);
     if (d) sel = d.fingerprint;
+  }
+  if (!sel && s.p2pReceiving?.length){
+    const incoming = s.p2pReceiving.find(p => s.devices.some(d => d.fingerprint === p.peer));
+    if (incoming) sel = incoming.peer;
   }
   renderCenter(s);
   renderChat(s);
 
   // ── 传输进行中 → 主区顶部进度卡（右上 ✕ 取消） ──
   const busy = [];
-  if (s.sending && s.sending.active){
-    const p = s.sending, pct = p.total ? Math.min(100, p.sent/p.total*100) : 0;
-    busy.push(`<div class="prog"><div class="row"><b>↑ ${esc(t('progSend', p.target_alias, p.file_name))}</b>
+  for (const [p, route] of [[s.sending,'lanRoute'],[s.p2pSending,s.p2pSending?.target_alias === 'HTTPS' ? 'httpsRelay' : 'p2pRoute']]){
+    const rate = uploadRate(route, p, performance.now());
+    if (!p || !p.active) continue;
+    const pct = p.total ? Math.min(100, p.sent/p.total*100) : 0;
+    busy.push(`<div class="prog"><div class="row"><span class="transfer-caption"><b title="${esc(p.file_name)}">↑ ${esc(t(route))} · ${esc(p.file_name)}</b><span class="transfer-rate">${esc(rate)}</span></span>
       <span class="sz">${fmtSize(p.sent)} / ${fmtSize(p.total)}</span>
       <button class="xbtn" title="${esc(t('cancelT'))}" aria-label="${esc(t('cancelT'))}" onclick="cancelSend()">✕</button></div>
+      <div class="bar"><i style="width:${pct}%"></i></div></div>`);
+  }
+  for (const p of (s.p2pReceiving || [])){
+    const pct = p.total ? Math.min(100, p.got/p.total*100) : 0;
+    busy.push(`<div class="prog"><div class="row"><b>↓ ${esc(t(p.relayed ? 'httpsRelay' : 'p2pRoute'))} · ${esc(t(p.verifying ? 'p2pVerifying' : 'p2pReceiving'))} · ${esc(t('progRecv', p.sender, p.name))}</b>
+      <span class="sz">${esc(p.file_type === 'application/octet-stream' ? t('p2pFileType') : p.file_type)} · ${fmtSize(p.got)} / ${fmtSize(p.total)}</span></div>
       <div class="bar"><i style="width:${pct}%"></i></div></div>`);
   }
   if (s.session && s.session.active){
@@ -1090,7 +1146,7 @@ function renderCenter(s){
   $('waitview').hidden = !!d;
   // 本机会话仅文字：文件 / 文件夹按钮停用（剪贴板按钮保留——粘贴文本仍可用）
   $('btn-cfile').disabled = isSelf;
-  $('btn-cfolder').disabled = isSelf || !!(d && d.transport === 'relay');
+  $('btn-cfolder').disabled = isSelf || !!(d && d.transport === 'p2p');
   if (d){
     let meta, alias;
     if (isSelf){
@@ -1100,11 +1156,11 @@ function renderCenter(s){
       $('ch-name').textContent = alias;
     } else {
       alias = displayAlias(d.alias);
-      $('ch-name').textContent = alias;
+      deviceName($('ch-name'), alias, d.p2p);
       meta = deviceMeta(d);
     }
     $('ch-meta').textContent = meta;
-    $('chrome-title').textContent = alias;
+    deviceName($('chrome-title'), alias, d.p2p);
     $('chrome-badge').hidden = !isSelf; // 本机会话：标题旁淡蓝「本机」徽标
     $('chrome-context').textContent = meta;
   } else {
@@ -1224,12 +1280,14 @@ function renderChat(s){
     if (m.out && !isSelf){ // 出站消息状态行：⏳ 发送中 / ✓ 已送达 / ⚠ 未送达（文本与带源路径的可重试；本机即时落库无需状态）
       const st = document.createElement('div'); st.className = 'st';
       if (m.status === 'sending') st.textContent = t('stSending');
+      else if (m.status === 'connecting') st.textContent = t(s.relay?.prefer_p2p ? 'p2pConnecting' : 'httpsRelayConnecting');
+      else if (m.status === 'resuming') st.textContent = t('p2pResume');
       else if (m.status === 'queued') st.textContent = t('stQueued');
       else if (m.status === 'accepted') st.textContent = t('stAccepted');
       else if (m.status === 'ok') st.textContent = t('stOk');
       else if (m.status === 'fail'){
         if (m.kind === 'text' || m.srcPath){
-          st.textContent = t('stFail');
+          st.textContent = m.failure ? '⚠ ' + m.failure + ' ' : t('stFail');
           const rb = document.createElement('button'); rb.className = 'rbtn';
           rb.textContent = t('stRetry');
           rb.onclick = () => retryMsg(m);
@@ -1436,7 +1494,7 @@ async function shareApi(path, body){
   const v = await r.json(); if (!r.ok) throw new Error(v.error || r.status); return v;
 }
 async function publishFolder(fp){
-  if (String(fp).startsWith('relay:')) return toast(t('relayFolderUnsupported'), true);
+  if (window._state?.devices.some(d => d.fingerprint === fp && d.transport === 'p2p')) return toast(t('relayFolderUnsupported'), true);
   if (isSelfTarget(fp)) return toast(t('selfNoFiles'), true);
   try {
     let paths;
@@ -1449,7 +1507,7 @@ async function publishFolder(fp){
 // 发送方流程保持简单：确认后发布共享并把邀请发进会话；后续进度、日志都在
 // 对方接收卡里（本版不回传接收进度，卡片文案已明确说明）。
 async function prepareFolderOffer(fp, path){
-  if (String(fp).startsWith('relay:')) return toast(t('relayFolderUnsupported'), true);
+  if (window._state?.devices.some(d => d.fingerprint === fp && d.transport === 'p2p')) return toast(t('relayFolderUnsupported'), true);
   if (!confirm(shareText('confirm'))) return;
   try {
     const v = await shareApi('shares', {path});
@@ -1780,7 +1838,8 @@ $('btn-settings').onclick = () => {
   $('set-dir').value = me.dir;
   const relay = window._state.relay || {};
   $('relay-enabled').checked = !!relay.enabled;
-  $('relay-url').value = relay.server_url || 'http://127.0.0.1:53320';
+  $('prefer-p2p').checked = !!relay.prefer_p2p;
+  $('relay-url').value = relay.server_url || 'https://p2p.bjjxysbz.com';
   $('relay-token').value = '';
   $('relay-token').placeholder = relay.has_token ? t('relayTokenSaved') : '';
   renderRelayStatus(relay);
@@ -1802,7 +1861,7 @@ $('relay-save').onclick = async () => {
   const btn = $('relay-save'); btn.disabled = true;
   try {
     const r = await fetch('/api/ui/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-      enabled:$('relay-enabled').checked,server_url:$('relay-url').value.trim(),token:$('relay-token').value.trim()
+      enabled:$('relay-enabled').checked,prefer_p2p:$('prefer-p2p').checked,server_url:$('relay-url').value.trim(),token:$('relay-token').value.trim()
     })});
     const v = await r.json(); if (!r.ok) throw new Error(v.error || r.status);
     $('relay-token').value = ''; $('relay-token').placeholder = t('relayTokenSaved');

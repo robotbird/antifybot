@@ -1,17 +1,19 @@
-//! Remote relay transport. Credentials stay in Rust; the panel only sees status.
+//! Direct transport and signaling. Credentials stay in Rust; the panel only sees status.
+mod direct;
 mod files;
 
 use crate::{
     db::RelayPending,
     state::{now_ms, ChatMsg, Shared},
 };
-use antify_protocol::{Body, FileInfo, SendMessage, ServerEvent};
+use antify_protocol::DirectDevice;
 use anyhow::{bail, ensure, Context, Result};
+use direct::transfer::{Payload, MAX_FILE};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{atomic::Ordering, Mutex},
     time::Duration,
@@ -22,16 +24,27 @@ use tokio_tungstenite::{
     tungstenite::{client::IntoClientRequest, Message as Frame},
 };
 
+const DEFAULT_SIGNAL_URL: &str = "https://p2p.bjjxysbz.com";
+const LEGACY_SIGNAL_URL: &str = "http://127.0.0.1:53320";
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct Settings {
     pub enabled: bool,
     pub server_url: String,
     pub token: String,
+    #[serde(default)]
+    pub prefer_p2p: bool,
 }
 impl Settings {
     pub fn scope(&self) -> String {
+        // Both addresses reach the same deployment and share its saved transfers.
+        let storage_url = if self.server_url == DEFAULT_SIGNAL_URL {
+            LEGACY_SIGNAL_URL
+        } else {
+            &self.server_url
+        };
         hex::encode(Sha256::digest(
-            format!("{}\n{}", self.server_url, self.token).as_bytes(),
+            format!("{}\n{}", storage_url, self.token).as_bytes(),
         ))[..20]
             .to_string()
     }
@@ -75,25 +88,40 @@ pub struct Status {
     pub device_id: String,
     pub error: String,
 }
-#[derive(Clone, Deserialize)]
-pub struct Peer {
-    pub id: String,
-    pub alias: String,
-    pub online: bool,
+
+#[derive(Clone, Serialize)]
+pub struct ReceiveProgress {
+    pub peer: String,
+    pub sender: String,
+    pub name: String,
+    pub file_type: String,
+    pub verifying: bool,
+    pub relayed: bool,
+    pub got: u64,
+    pub total: u64,
 }
 
 pub struct Runtime {
     settings: RwLock<Settings>,
     status: RwLock<Status>,
-    peers: RwLock<Vec<Peer>>,
+    online: RwLock<HashSet<String>>,
     changed: Notify,
+    pub progress: Mutex<crate::state::SendProgress>,
+    receiving: Mutex<HashMap<(String, String), Option<ReceiveProgress>>>,
 }
 impl Runtime {
+    pub fn receiving_files(&self) -> Vec<ReceiveProgress> {
+        self.receiving.lock().unwrap().values().flatten().cloned().collect()
+    }
+
     pub fn load(dir: &Path) -> Self {
         let mut cfg: Settings = std::fs::read(dir.join("relay.json"))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
+        if matches!(cfg.server_url.trim().trim_end_matches('/'), "" | LEGACY_SIGNAL_URL) {
+            cfg.server_url = DEFAULT_SIGNAL_URL.into();
+        }
         let error = match cfg.validate() {
             Ok(()) => String::new(),
             Err(e) => {
@@ -107,8 +135,10 @@ impl Runtime {
                 error,
                 ..Default::default()
             }),
-            peers: RwLock::new(vec![]),
+            online: RwLock::new(HashSet::new()),
             changed: Notify::new(),
+            progress: Mutex::new(Default::default()),
+            receiving: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -119,17 +149,33 @@ pub fn is_remote(peer: &str) -> bool {
 fn peer_key(cfg: &Settings, id: &str) -> String {
     format!("relay:{}:{id}", cfg.scope())
 }
-fn recipient<'a>(cfg: &Settings, peer: &'a str) -> Result<&'a str> {
-    ensure!(cfg.enabled, "请先在设置中启用远程连接");
-    peer.strip_prefix(&format!("relay:{}:", cfg.scope()))
-        .filter(|s| !s.is_empty())
-        .context("该会话不属于当前中转配置，请重新选择设备")
+pub async fn route_remote(state: &Shared, peer: &str) -> bool {
+    if is_remote(peer) {
+        return true;
+    }
+    if state
+        .devices
+        .lock()
+        .await
+        .get(peer)
+        .is_some_and(|d| now_ms().saturating_sub(d.last_seen) < 10_000)
+    {
+        return false;
+    }
+    let cfg = state.relay.settings.read().await;
+    cfg.enabled
+        && state
+            .db
+            .direct_devices(&cfg.scope())
+            .unwrap_or_default()
+            .iter()
+            .any(|device| device.fingerprint == peer)
 }
 
 pub async fn view(state: &Shared) -> serde_json::Value {
     let cfg = state.relay.settings.read().await;
     let status = state.relay.status.read().await;
-    serde_json::json!({"enabled":cfg.enabled,"server_url":cfg.server_url,"has_token":!cfg.token.is_empty(),"connected":status.connected,"device_id":status.device_id,"error":status.error})
+    serde_json::json!({"enabled":cfg.enabled,"server_url":cfg.server_url,"prefer_p2p":cfg.prefer_p2p,"has_token":!cfg.token.is_empty(),"connected":status.connected,"device_id":status.device_id,"error":status.error})
 }
 pub async fn devices(state: &Shared) -> Vec<serde_json::Value> {
     let cfg = state.relay.settings.read().await;
@@ -137,10 +183,14 @@ pub async fn devices(state: &Shared) -> Vec<serde_json::Value> {
     if !cfg.enabled {
         return vec![];
     }
-    state.relay.peers.read().await.iter().filter(|p| p.id != status.device_id).map(|p| serde_json::json!({
-        "fingerprint":peer_key(&cfg,&p.id),"alias":p.alias,"online":status.connected && p.online,
-        "transport":"relay","deviceType":"desktop","ip":"","port":null,"lastSeenMs":0,"version":"relay-v1",
-    })).collect()
+    let online = state.relay.online.read().await;
+    state.db.direct_devices(&cfg.scope()).unwrap_or_default().into_iter()
+        .filter(|p| p.id != status.device_id && p.fingerprint != state.identity.fingerprint)
+        .map(|p| serde_json::json!({
+            "fingerprint":p.fingerprint,"legacyPeer":peer_key(&cfg,&p.id),"alias":p.alias,
+            "online":status.connected && online.contains(&p.id),"p2p":true,
+            "transport":"p2p","deviceType":"desktop","ip":"","port":null,"lastSeenMs":0,"version":"p2p-v1",
+        })).collect()
 }
 
 /// Blank token means retain the previously saved credential; never echo it back.
@@ -172,7 +222,7 @@ pub async fn configure(state: &Shared, mut cfg: Settings) -> Result<()> {
     *state.relay.settings.write().await = cfg;
     *state.relay.status.write().await = Status::default();
     if changed_scope {
-        state.relay.peers.write().await.clear();
+        state.relay.online.write().await.clear();
     }
     state.relay.changed.notify_one();
     Ok(())
@@ -180,14 +230,14 @@ pub async fn configure(state: &Shared, mut cfg: Settings) -> Result<()> {
 
 async fn target(state: &Shared, peer: &str) -> Result<(Settings, String, String)> {
     let cfg = state.relay.settings.read().await.clone();
-    let id = recipient(&cfg, peer)?.to_string();
-    let peers = state.relay.peers.read().await;
-    let alias = peers
-        .iter()
-        .find(|p| p.id == id)
-        .map(|p| p.alias.clone())
-        .context("远程设备不存在，请等待连接恢复")?;
-    Ok((cfg, id, alias))
+    ensure!(cfg.enabled, "请先在设置中启用远程连接");
+    let device = state
+        .db
+        .direct_devices(&cfg.scope())?
+        .into_iter()
+        .find(|p| p.fingerprint == peer || peer_key(&cfg, &p.id) == peer)
+        .context("远程设备尚未完成身份关联，请等待连接")?;
+    Ok((cfg, device.id, device.alias))
 }
 pub async fn enqueue_text(state: &Shared, peer: &str, text: String) -> Result<u64> {
     ensure!(
@@ -195,7 +245,7 @@ pub async fn enqueue_text(state: &Shared, peer: &str, text: String) -> Result<u6
         "文字最多 32 KiB"
     );
     let (cfg, to, alias) = target(state, peer).await?;
-    let body = serde_json::to_string(&Body::Text { text: text.clone() })?;
+    let body = serde_json::to_string(&Payload::Text { text: text.clone() })?;
     let id = state.db.relay_enqueue(
         &cfg.scope(),
         &uuid::Uuid::new_v4().to_string(),
@@ -223,8 +273,8 @@ pub async fn enqueue_file(
     let (cfg, to, alias) = target(state, peer).await?;
     let meta = tokio::fs::metadata(&path).await?;
     ensure!(
-        meta.is_file() && meta.len() <= files::MAX_FILE,
-        "中转文件须为不超过 100 MiB 的普通文件"
+        meta.is_file() && meta.len() <= MAX_FILE,
+        "直传文件须为不超过 16 GiB 的普通文件"
     );
     let name = name.unwrap_or_else(|| {
         path.file_name()
@@ -233,11 +283,22 @@ pub async fn enqueue_file(
             .into_owned()
     });
     files::safe_name(&name)?;
+    let mut source = tokio::fs::File::open(&path).await?;
+    let sha256 = direct::transfer::hash(&mut source).await?;
+    ensure!(
+        source.metadata().await?.len() == meta.len(),
+        "源文件在读取时发生变化"
+    );
+    let payload = serde_json::to_string(&Payload::File {
+        name: name.clone(),
+        size: meta.len(),
+        sha256,
+    })?;
     let id = state.db.relay_enqueue(
         &cfg.scope(),
         &uuid::Uuid::new_v4().to_string(),
         &to,
-        None,
+        Some(&payload),
         &ChatMsg {
             out: true,
             peer: peer.into(),
@@ -270,7 +331,7 @@ pub async fn enqueue_stream(
 ) -> Result<u64> {
     target(state, peer).await?;
     files::safe_name(&name)?;
-    ensure!(size <= files::MAX_FILE, "单文件最多 100 MiB");
+    ensure!(size <= MAX_FILE, "单文件最多 16 GiB");
     let dir = state.identity.cfg_dir.join("relay-outbox");
     tokio::fs::create_dir_all(&dir).await?;
     let path = dir.join(uuid::Uuid::new_v4().to_string());
@@ -307,7 +368,7 @@ pub fn start(state: Shared) -> tokio::task::JoinHandle<()> {
             }
             tokio::select! {
                 _ = &mut changed => { backoff=1; }
-                result = session(&state,&cfg) => {
+                result = direct::session(&state,&cfg) => {
                     let error = result.err().map(|e| e.to_string()).unwrap_or_else(|| "连接已关闭".into());
                     { let mut s = state.relay.status.write().await; s.connected=false; s.error=error; }
                     tokio::select! { _ = &mut changed => { backoff=1; }, _ = tokio::time::sleep(Duration::from_secs(backoff)) => { backoff=(backoff*2).min(15); } }
@@ -315,256 +376,4 @@ pub fn start(state: Shared) -> tokio::task::JoinHandle<()> {
             }
         }
     })
-}
-
-fn http() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .use_rustls_tls()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(15))
-        .build()?)
-}
-async fn ack(client: &reqwest::Client, cfg: &Settings, id: &str) -> Result<()> {
-    client
-        .post(format!("{}/v1/messages/{id}/ack", cfg.server_url))
-        .bearer_auth(&cfg.token)
-        .send()
-        .await?
-        .error_for_status()?;
-    Ok(())
-}
-
-async fn session(state: &Shared, cfg: &Settings) -> Result<()> {
-    let client = http()?;
-    let url = format!("{}/v1/ws", cfg.server_url.replacen("http", "ws", 1));
-    let mut request = url.into_client_request()?;
-    request
-        .headers_mut()
-        .insert("authorization", format!("Bearer {}", cfg.token).parse()?);
-    let (mut socket, _) =
-        tokio::time::timeout(Duration::from_secs(10), connect_async(request)).await??;
-    let frame = tokio::time::timeout(Duration::from_secs(10), socket.next())
-        .await?
-        .context("服务端未返回设备身份")??;
-    let ServerEvent::Ready { device_id } = serde_json::from_str(frame.to_text()?)? else {
-        bail!("中转服务握手异常");
-    };
-    *state.relay.status.write().await = Status {
-        connected: true,
-        device_id: device_id.clone(),
-        error: String::new(),
-    };
-    let (mut writer, mut reader) = socket.split();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<ServerEvent>(256);
-    let inflight = Mutex::new(HashSet::<String>::new());
-    let read = async {
-        loop {
-            let frame = tokio::time::timeout(Duration::from_secs(65), reader.next())
-                .await?
-                .context("中转连接已关闭")??;
-            match frame {
-                Frame::Ping(data) => {
-                    tokio::time::timeout(Duration::from_secs(10), writer.send(Frame::Pong(data)))
-                        .await??;
-                }
-                Frame::Close(_) => bail!("中转连接已关闭"),
-                Frame::Text(text) => {
-                    let event: ServerEvent = serde_json::from_str(&text)?;
-                    let key = event_key(&event);
-                    if let Some(key) = key {
-                        let mut set = inflight.lock().unwrap();
-                        if set.insert(key) {
-                            tx.try_send(event)
-                                .context("接收队列已满，正在重新连接补收")?;
-                        }
-                    }
-                }
-                _ => (),
-            }
-        }
-        #[allow(unreachable_code)]
-        Ok::<(), anyhow::Error>(())
-    };
-    let process = async {
-        while let Some(event) = rx.recv().await {
-            let key = event_key(&event).unwrap();
-            if let Err(e) = receive(state, cfg, &client, &device_id, event).await {
-                state.relay.status.write().await.error = format!("接收失败，将重试：{e}");
-            }
-            inflight.lock().unwrap().remove(&key);
-        }
-        Ok::<(), anyhow::Error>(())
-    };
-    let peers = async {
-        let mut tick = tokio::time::interval(Duration::from_secs(5));
-        loop {
-            tick.tick().await;
-            let peers = client
-                .get(format!("{}/v1/devices", cfg.server_url))
-                .bearer_auth(&cfg.token)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<Vec<Peer>>()
-                .await?;
-            *state.relay.peers.write().await = peers;
-        }
-        #[allow(unreachable_code)]
-        Ok::<(), anyhow::Error>(())
-    };
-    tokio::select! { r=read=>r, r=process=>r, r=peers=>r, r=outbox(state,cfg,&client)=>r }
-}
-fn event_key(event: &ServerEvent) -> Option<String> {
-    match event {
-        ServerEvent::Message { message } => Some(format!("m:{}", message.id)),
-        ServerEvent::Delivered { id } => Some(format!("d:{id}")),
-        _ => None,
-    }
-}
-
-async fn receive(
-    state: &Shared,
-    cfg: &Settings,
-    client: &reqwest::Client,
-    me: &str,
-    event: ServerEvent,
-) -> Result<()> {
-    let scope = cfg.scope();
-    match event {
-        ServerEvent::Delivered { id } => {
-            if let Some((local, path)) = state.db.relay_delivered(&scope, &id)? {
-                state.set_msg_status(local, "ok").await;
-                if Path::new(&path).starts_with(state.identity.cfg_dir.join("relay-outbox")) {
-                    let _ = tokio::fs::remove_file(path).await;
-                }
-            }
-            ack(client, cfg, &id).await?;
-        }
-        ServerEvent::Message { message } => {
-            uuid::Uuid::parse_str(&message.id)?;
-            ensure!(message.to == me, "收到非本机消息");
-            if !state.db.relay_seen(&scope, &message.id)? {
-                let alias = state
-                    .relay
-                    .peers
-                    .read()
-                    .await
-                    .iter()
-                    .find(|p| p.id == message.from)
-                    .map(|p| p.alias.clone())
-                    .unwrap_or_else(|| message.from.clone());
-                let mut msg = ChatMsg {
-                    peer: peer_key(cfg, &message.from),
-                    peer_alias: alias,
-                    at: (message.created_at.max(0) as u64).saturating_mul(1000),
-                    ..Default::default()
-                };
-                match message.body {
-                    Body::Text { text } => {
-                        msg.kind = "text".into();
-                        msg.text = text;
-                    }
-                    Body::File { file_id } => {
-                        let info: FileInfo = client
-                            .get(format!("{}/v1/files/{file_id}/info", cfg.server_url))
-                            .bearer_auth(&cfg.token)
-                            .send()
-                            .await?
-                            .error_for_status()?
-                            .json()
-                            .await?;
-                        let file = files::download(state, cfg, client, &message.id, &info).await?;
-                        msg.kind = "file".into();
-                        msg.name = info.name;
-                        msg.size = info.size;
-                        msg.file = file;
-                    }
-                }
-                if state.db.relay_receive(&scope, &message.id, &msg)? && !state.panel_watching() {
-                    if msg.kind == "text" {
-                        crate::notify::message(&msg.peer_alias, &msg.text);
-                    } else {
-                        crate::notify::file(&msg.peer_alias, &msg.peer, &msg.name, msg.size);
-                    }
-                }
-            }
-            ack(client, cfg, &message.id).await?;
-        }
-        _ => (),
-    }
-    Ok(())
-}
-
-async fn outbox(state: &Shared, cfg: &Settings, client: &reqwest::Client) -> Result<()> {
-    let mut tick = tokio::time::interval(Duration::from_secs(2));
-    loop {
-        tick.tick().await;
-        for item in state.db.relay_pending(&cfg.scope())? {
-            if let Err(e) = send_pending(state, cfg, client, &item).await {
-                let status = e.downcast_ref::<reqwest::Error>().and_then(|e| e.status());
-                let permanent = e.downcast_ref::<std::io::Error>().is_some()
-                    || status.is_some_and(|s| {
-                        s.is_client_error() && s.as_u16() != 408 && s.as_u16() != 429
-                    })
-                    || (!item.src_path.is_empty() && state.send_cancel.load(Ordering::Relaxed));
-                state.db.relay_status(
-                    &cfg.scope(),
-                    &item.remote_id,
-                    if permanent { "fail" } else { "queued" },
-                )?;
-                state.relay.status.write().await.error = format!(
-                    "发送失败{}：{e}",
-                    if permanent {
-                        "，请重试"
-                    } else {
-                        "，稍后自动重试"
-                    }
-                );
-            }
-        }
-    }
-}
-async fn send_pending(
-    state: &Shared,
-    cfg: &Settings,
-    client: &reqwest::Client,
-    item: &RelayPending,
-) -> Result<()> {
-    let body = match &item.body {
-        Some(body) => serde_json::from_str::<Body>(body)?,
-        None => {
-            state
-                .db
-                .relay_status(&cfg.scope(), &item.remote_id, "sending")?;
-            let info = files::upload(state, cfg, client, item).await?;
-            let body = Body::File { file_id: info.id };
-            state.db.relay_body(
-                &cfg.scope(),
-                &item.remote_id,
-                &serde_json::to_string(&body)?,
-            )?;
-            body
-        }
-    };
-    let reply: ServerEvent = client
-        .post(format!("{}/v1/messages", cfg.server_url))
-        .bearer_auth(&cfg.token)
-        .json(&SendMessage {
-            id: item.remote_id.clone(),
-            to: item.recipient.clone(),
-            body,
-        })
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    ensure!(
-        matches!(reply,ServerEvent::Accepted { ref id } if *id == item.remote_id),
-        "服务端未确认消息"
-    );
-    state
-        .db
-        .relay_status(&cfg.scope(), &item.remote_id, "accepted")?;
-    Ok(())
 }
